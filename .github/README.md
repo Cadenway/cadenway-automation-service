@@ -2,14 +2,14 @@
 
 waypoint-automation-service owns "When… then…" rules. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@waypoint/nest-messaging`, internal REST for the API gateway. Local port 3017.
 
-| | |
-| --- | --- |
-| Data | Rules and their execution log. |
-| API | Rules (list, create, enable, delete), latest runs. |
-| Emits | `automation.executed` |
-| Listens to | `task.created`, `task.status-changed` |
-| External | None. |
-| Phase | Extracted later, when needed |
+|            |                                                    |
+| ---------- | -------------------------------------------------- |
+| Data       | Rules and their execution log.                     |
+| API        | Rules (list, create, enable, delete), latest runs. |
+| Emits      | `automation.executed`                              |
+| Listens to | `task.created`, `task.status-changed`              |
+| External   | None.                                              |
+| Phase      | Extracted later, when needed                       |
 
 Starts as a module of waypoint-task-service.
 
