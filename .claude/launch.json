@@ -1,0 +1,13 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "waypoint-automation-service",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "start:dev"
+      ],
+      "port": 3017
+    }
+  ]
+}
