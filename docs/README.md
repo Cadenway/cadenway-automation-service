@@ -1,6 +1,6 @@
-# waypoint-automation-service documentation
+# cadenway-automation-service documentation
 
-Planned role: waypoint-automation-service owns "When… then…" rules. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@waypoint/nest-messaging`, internal REST for the API gateway. Local port 3017.
+Planned role: cadenway-automation-service owns "When… then…" rules. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@cadenway/nest-messaging`, internal REST for the API gateway. Local port 3017.
 
 ## Current status
 

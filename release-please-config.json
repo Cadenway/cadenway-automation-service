@@ -3,7 +3,7 @@
   "packages": {
     ".": {
       "release-type": "node",
-      "package-name": "waypoint-automation-service",
+      "package-name": "cadenway-automation-service",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false
     }

@@ -1,7 +1,7 @@
 {
-  "name": "waypoint-automation-service",
+  "name": "cadenway-automation-service",
   "version": "0.0.0",
-  "description": "Waypoint automation service: when-then rules.",
+  "description": "Cadenway automation service: when-then rules.",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",
