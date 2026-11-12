@@ -1,6 +1,6 @@
 {
   "name": "cadenway-automation-service",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Cadenway automation service: when-then rules.",
   "private": true,
   "license": "UNLICENSED",
