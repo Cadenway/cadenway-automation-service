@@ -1,7 +1,7 @@
 {
   "name": "cadenway-automation-service",
   "version": "0.1.0",
-  "description": "cadenway-automation-service tooling: 16 cw-automation-* agents (module, domain, use case, endpoint, event, persistence, migration, test and deployment builders plus read-only architecture, contract, security, observability and performance reviewers for the automation service, plus a .github maintainer), 17 /cw-* commands, 13 path-scoped rules, 18 skills, and the guard, git-guard and format hooks. The plugin root is this .claude/ folder; the hooks only act inside a cadenway-automation-service checkout.",
+  "description": "cadenway-automation-service tooling: 16 cw-automation-* agents (module, domain, use case, endpoint, event, persistence, migration, test and deployment builders plus read-only architecture, contract, security, observability and performance reviewers for the automation service, plus a .github maintainer), 17 /cw-* commands, 13 path-scoped rules, 20 skills, and the guard, git-guard and format hooks. The plugin root is this .claude/ folder; the hooks only act inside a cadenway-automation-service checkout.",
   "author": {
     "name": "Valentin FORTIN"
   }
