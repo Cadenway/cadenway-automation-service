@@ -30,7 +30,9 @@ The tables and rules on this page are **target domain behavior**, not proof of a
 
 ## Notes
 
-Starts as a module of cadenway-task-service.
+Built in this repository from the start: it never lives as a module of another service.
+
+Decided: actions call the internal APIs of cadenway-task-service and cadenway-notification-service directly, with this service's own internal token (`aud` set to the called service) and the actor type `automation`. An event whose actor type is `automation` never triggers a rule, so a rule cannot loop on its own action.
 
 Everything above comes from the [repositories document](https://claude.ai/artifact/BPinmYxoF3mbK8w9BMB43N) and the
 [integration guide](https://claude.ai/artifact/CpJHVCiFfF9j3KbHQ2S1Et). If the mockup disagrees with this guide, update the guide and its source skill for both assistants.
