@@ -29,9 +29,9 @@ cadenway-automation-service owns "When… then…" rules. NestJS, its own Postgr
 | Emits      | `automation.executed`                              |
 | Listens to | `task.created`, `task.status-changed`              |
 | External   | None.                                              |
-| Phase      | Extracted later, when needed                       |
+| Phase      | After the first version                            |
 
-Starts as a module of cadenway-task-service.
+Built in this repository from the start: it never lives as a module of another service.
 
 ## Language
 
