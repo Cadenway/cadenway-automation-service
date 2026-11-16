@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/Cadenway/cadenway-automation-service/compare/v0.2.0...v0.3.0) (2026-11-16)
+
+
+### Features
+
+* wire messaging and the outbox onto nest-common 0.3.0 ([#19](https://github.com/Cadenway/cadenway-automation-service/issues/19)) ([149c588](https://github.com/Cadenway/cadenway-automation-service/commit/149c588790cdbf2dc8274f0b54d844dbd9e2fabd))
+
+
+### Bug Fixes
+
+* **deploy:** keep the migrator url out of the running service ([#21](https://github.com/Cadenway/cadenway-automation-service/issues/21)) ([ca32f0e](https://github.com/Cadenway/cadenway-automation-service/commit/ca32f0e0fda909a8e7123876978a4dd85899f9ed))
+
 ## [0.2.0](https://github.com/Cadenway/cadenway-automation-service/compare/v0.1.0...v0.2.0) (2026-11-15)
 
 
