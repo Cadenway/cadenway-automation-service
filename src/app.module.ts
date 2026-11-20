@@ -58,6 +58,7 @@ import { PlatformModule } from './modules/platform/platform.module.js';
       useFactory: (config: AppConfig) => ({
         connectionString: config.DATABASE_URL,
         applicationName: 'automation-service',
+        transactionMaxAttempts: config.DATABASE_TRANSACTION_MAX_ATTEMPTS,
         idempotency: true,
       }),
     }),
