@@ -26,6 +26,7 @@ describe('appConfigSchema', () => {
       LOG_LEVEL: 'info',
       LOG_PRETTY: false,
       DATABASE_URL: 'postgres://automation_app:automation_app@localhost:5432/automation',
+      DATABASE_TRANSACTION_MAX_ATTEMPTS: 3,
       NATS_URL: 'nats://localhost:4222',
       NATS_USER: 'automation',
       NATS_PASSWORD: 'automation',
