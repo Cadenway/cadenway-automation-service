@@ -31,6 +31,8 @@ describe('appConfigSchema', () => {
       NATS_USER: 'automation',
       NATS_PASSWORD: 'automation',
       INTERNAL_TOKEN_AUDIENCE: 'automation-service',
+      INTERNAL_TOKEN_ISSUER: 'automation-service',
+      AUTOMATION_TASK_TRIGGERS_ENABLED: false,
       INTERNAL_TOKEN_TRUSTED_ISSUERS: {
         'api-gateway': [
           {
@@ -51,6 +53,19 @@ describe('appConfigSchema', () => {
 
     expect(() => loadConfig(appConfigSchema, example)).not.toThrow();
     expect(() => loadConfig(migrationConfigSchema, example)).not.toThrow();
+  });
+
+  it('requires a signed Task transport only when its triggers are enabled', () => {
+    const config = appConfigSchema.safeParse({
+      ...complete,
+      AUTOMATION_TASK_TRIGGERS_ENABLED: 'true',
+    });
+    expect(config.success).toBe(false);
+    if (config.success) throw new Error('Expected config validation to fail.');
+    expect(config.error.issues.map((issue) => issue.path[0])).toEqual([
+      'INTERNAL_TOKEN_PRIVATE_JWK',
+      'TASK_SERVICE_URL',
+    ]);
   });
 
   it('refuses to start without the database, the broker, the audience or the trusted issuers', () => {

@@ -1,6 +1,7 @@
 import { CONFIG, ConfigModule, HealthModule, postgresIndicator } from '@cadenway/nest-common';
 import type { PostgresProbe } from '@cadenway/nest-common';
 import { DATABASE_POOL, DatabaseModule } from '@cadenway/nest-common/database';
+import { JobsRuntimeModule } from '@cadenway/nest-jobs/runtime';
 import {
   MessagingConnection,
   MessagingModule,
@@ -11,6 +12,8 @@ import { Module } from '@nestjs/common';
 
 import { appConfigSchema } from './config/app-config.js';
 import type { AppConfig } from './config/app-config.js';
+import { AUTOMATION_TASK_TRIGGER_QUEUE } from './config/job-queues.js';
+import { AutomationsModule } from './modules/automations/automations.module.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
 
 /**
@@ -32,8 +35,7 @@ import { PlatformModule } from './modules/platform/platform.module.js';
  *   `_INBOX.automation` the broker requires. The creation waits for the first connection, then
  *   checks that the `EVENTS` stream exists: cadenway-ops creates the streams
  *   (`manageStreams: false`), and only notification-service runs the dead-letter worker. The
- *   service publishes and consumes nothing yet: `@cadenway/contracts` defines neither its
- *   `automation.executed` event nor the task events it listens to.
+ *   Automations module will bind its event contracts after their publication and installation.
  * - `OutboxModule`: the outbox writer, the PostgreSQL deduplicator and the relay, which polls
  *   `outbox_events` every second in a system transaction and publishes the pending rows. It runs in
  *   every replica; `for update skip locked` keeps two of them from publishing the same row.
@@ -74,6 +76,17 @@ import { PlatformModule } from './modules/platform/platform.module.js';
       }),
     }),
     OutboxModule.forRoot(),
+    JobsRuntimeModule.forRootAsync({
+      inject: [CONFIG],
+      useFactory: (config: AppConfig) => ({
+        connection: { connectionString: config.DATABASE_URL },
+        queues: [AUTOMATION_TASK_TRIGGER_QUEUE],
+        // Scheduler capability also recovers timed-out attempts and supervises dead letters.
+        capabilities: ['producer', 'worker', 'scheduler'],
+        poolSize: 2,
+        shutdownTimeoutMs: 8_000,
+      }),
+    }),
     HealthModule.forRootAsync({
       inject: [DATABASE_POOL, MessagingConnection],
       useFactory: (pool: PostgresProbe, connection: MessagingConnection) => ({
@@ -82,6 +95,7 @@ import { PlatformModule } from './modules/platform/platform.module.js';
       }),
     }),
     PlatformModule,
+    AutomationsModule,
   ],
 })
 export class AppModule {}

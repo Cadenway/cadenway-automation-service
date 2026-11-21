@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 import {
   createApplication,
   InternalTokenSigner,
+  InternalTokenVerifier,
   loadConfig,
   runWithOrganizationContext,
 } from '@cadenway/nest-common';
@@ -21,6 +23,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { taskCreatedV1Schema } from '@cadenway/contracts/events/task-service';
 
 import { AppModule } from '../src/app.module.js';
 import { appConfigSchema } from '../src/config/app-config.js';
@@ -205,6 +208,43 @@ class WiringProbeController {
 
 describe('automation-service wiring', () => {
   const gateway = keyPair();
+  const automation = keyPair();
+  const taskCalls: {
+    readonly path: string | undefined;
+    readonly key: string | string[] | undefined;
+    readonly body: unknown;
+    readonly principal: unknown;
+  }[] = [];
+  let verifier: InternalTokenVerifier;
+  const task = createHttpServer((incoming, outgoing) => {
+    let body = '';
+    incoming.setEncoding('utf8');
+    incoming.on('data', (chunk: string) => {
+      body += chunk;
+    });
+    incoming.on('end', () => {
+      const token = incoming.headers.authorization?.replace(/^Bearer /u, '') ?? '';
+      void verifier.verify(token).then(
+        (principal) => {
+          taskCalls.push({
+            path: incoming.url,
+            key: incoming.headers['idempotency-key'],
+            body: JSON.parse(body) as unknown,
+            principal,
+          });
+          outgoing.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'private, no-store',
+          });
+          outgoing.end(JSON.stringify({ disposition: 'applied' }));
+        },
+        () => {
+          outgoing.writeHead(401);
+          outgoing.end();
+        },
+      );
+    });
+  });
   let app: NestExpressApplication | undefined;
   let signer: InternalTokenSigner;
   let migrator: pg.Pool;
@@ -260,6 +300,18 @@ describe('automation-service wiring', () => {
     vi.stubEnv('NATS_USER', 'automation');
     vi.stubEnv('NATS_PASSWORD', 'automation');
     vi.stubEnv('INTERNAL_TOKEN_AUDIENCE', 'automation-service');
+    verifier = await InternalTokenVerifier.create({
+      audience: 'task-service',
+      trustedIssuers: { 'automation-service': [automation.publicJwk] },
+    });
+    await new Promise<void>((resolve) => task.listen(0, '127.0.0.1', resolve));
+    const address = task.address();
+    if (address === null || typeof address === 'string')
+      throw new Error('Task fixture has no port.');
+    vi.stubEnv('TASK_SERVICE_URL', `http://127.0.0.1:${String(address.port)}`);
+    vi.stubEnv('INTERNAL_TOKEN_PRIVATE_JWK', JSON.stringify(automation.privateJwk));
+    vi.stubEnv('AUTOMATION_TASK_TRIGGERS_ENABLED', 'true');
+    vi.stubEnv('AUTOMATION_CURSOR_SIGNING_KEY', randomBytes(32).toString('hex'));
     vi.stubEnv(
       'INTERNAL_TOKEN_TRUSTED_ISSUERS',
       JSON.stringify({ 'api-gateway': [gateway.publicJwk] }),
@@ -296,6 +348,13 @@ describe('automation-service wiring', () => {
     try {
       releaseShutdown();
       await app?.close();
+      if (task.listening) {
+        await new Promise<void>((resolve) => {
+          task.close(() => {
+            resolve();
+          });
+        });
+      }
       await migrator.end();
     } finally {
       vi.unstubAllEnvs();
@@ -303,7 +362,7 @@ describe('automation-service wiring', () => {
     }
   });
 
-  it('applies its migration as the migrator role, which owns the platform tables', async () => {
+  it('applies migrations as the migrator role, which owns the platform and rule tables', async () => {
     const tables = await migrator.query<{ tablename: string; tableowner: string }>(
       `select tablename, tableowner from pg_tables where schemaname = 'public' order by tablename`,
     );
@@ -312,9 +371,12 @@ describe('automation-service wiring', () => {
     );
 
     expect(tables.rows).toEqual(
-      platformTables.map((tablename) => ({ tablename, tableowner: 'automation_migrator' })),
+      ['automation_rules', 'automation_runs', ...platformTables].map((tablename) => ({
+        tablename,
+        tableowner: 'automation_migrator',
+      })),
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: 3 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -323,7 +385,85 @@ describe('automation-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: 3 }]);
+  });
+
+  it('replays rule creation per actor and authenticates the listing cursor', async () => {
+    const rulesOrganizationId = '01938f6e-0000-7000-8000-000000000072';
+    const [ownerToken, adminToken] = await Promise.all([
+      signer.sign('automation-service', {
+        actor: { type: 'user', id: camilleMartinId },
+        organizationId: rulesOrganizationId,
+        role: 'owner',
+      }),
+      signer.sign('automation-service', {
+        actor: { type: 'user', id: '01938f6e-0000-7000-8000-000000000071' },
+        organizationId: rulesOrganizationId,
+        role: 'admin',
+      }),
+    ]);
+    const key = randomUUID();
+    const create = (token: string) =>
+      request(service().getHttpServer())
+        .post('/internal/v1/automations')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', key)
+        .send({ trigger: { type: 'created' }, action: { type: 'priority', priority: 'haute' } });
+
+    const created = await create(ownerToken).expect(201);
+    const replay = await create(ownerToken).expect(201);
+    const other = await create(adminToken).expect(201);
+    expect(replay.headers['idempotent-replayed']).toBe('true');
+    expect(replay.body).toEqual(created.body);
+    expect(other.body).not.toEqual(created.body);
+    expect(other.headers['idempotent-replayed']).toBeUndefined();
+
+    const list = (cursor?: string) =>
+      request(service().getHttpServer())
+        .get('/internal/v1/automations')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .query({ limit: 1, ...(cursor === undefined ? {} : { cursor }) });
+    const first = await list().expect(200);
+    const page = first.body as { readonly nextCursor: unknown };
+    expect(typeof page.nextCursor).toBe('string');
+    if (typeof page.nextCursor !== 'string') throw new Error('Expected an authenticated cursor.');
+    await list(page.nextCursor).expect(200);
+    const forged = await list(`A${page.nextCursor}`).expect(400);
+    expect(forged.body).toMatchObject({ code: 'request.invalid' });
+  });
+
+  it('requires current signed recipient proof before replaying a stored rule', async () => {
+    const organizationId = '01938f6e-0000-7000-8000-000000000073';
+    const recipientId = '01938f6e-0000-7000-8000-000000000074';
+    const token = (scopes: readonly string[]) =>
+      signer.sign('automation-service', {
+        actor: { type: 'user', id: camilleMartinId },
+        organizationId,
+        role: 'owner',
+        scopes,
+      });
+    const [approved, missing, stale] = await Promise.all([
+      token([`automation:recipient:${recipientId}`]),
+      token([]),
+      token([`automation:recipient:${camilleMartinId}`]),
+    ]);
+    const key = randomUUID();
+    const create = (authorization: string) =>
+      request(service().getHttpServer())
+        .post('/internal/v1/automations')
+        .set('Authorization', `Bearer ${authorization}`)
+        .set('Idempotency-Key', key)
+        .send({ trigger: { type: 'created' }, action: { type: 'assign', userId: recipientId } });
+
+    const first = await create(approved).expect(201);
+    for (const refused of [missing, stale]) {
+      const response = await create(refused).expect(422);
+      expect(response.body).toMatchObject({ code: 'automation.recipient-ineligible' });
+      expect(response.headers['idempotent-replayed']).toBeUndefined();
+    }
+    const replay = await create(approved).expect(201);
+    expect(replay.headers['idempotent-replayed']).toBe('true');
+    expect(replay.body).toEqual(first.body);
   });
 
   it('forces row-level security on the tables that carry an organization', async () => {
@@ -342,12 +482,16 @@ describe('automation-service wiring', () => {
     );
 
     expect(tables.rows).toEqual([
+      { relname: 'automation_rules', relrowsecurity: true, relforcerowsecurity: true },
+      { relname: 'automation_runs', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'event_versions', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'idempotency_keys', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'outbox_events', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'processed_events', relrowsecurity: false, relforcerowsecurity: false },
     ]);
     expect(policies.rows).toEqual([
+      { tablename: 'automation_rules', policyname: 'automation_rules_tenant_isolation' },
+      { tablename: 'automation_runs', policyname: 'automation_runs_tenant_isolation' },
       { tablename: 'event_versions', policyname: 'event_versions_organization_isolation' },
       { tablename: 'idempotency_keys', policyname: 'idempotency_keys_organization_isolation' },
       { tablename: 'outbox_events', policyname: 'outbox_events_organization_isolation' },
@@ -519,7 +663,132 @@ describe('automation-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: 3 }]);
+  });
+
+  it('runs a created-task rule once through JetStream and records its execution', async () => {
+    const organizationId = '01938f6e-0000-7000-8000-000000000075';
+    const ownerToken = await signer.sign('automation-service', {
+      actor: { type: 'user', id: camilleMartinId },
+      organizationId,
+      role: 'owner',
+    });
+    const created = await request(service().getHttpServer())
+      .post('/internal/v1/automations')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .set('Idempotency-Key', randomUUID())
+      .send({ trigger: { type: 'created' }, action: { type: 'priority', priority: 'haute' } })
+      .expect(201);
+    const { ruleId } = created.body as { readonly ruleId: string };
+    const event = taskCreatedV1Schema.parse({
+      id: randomUUID(),
+      occurredAt: new Date().toISOString(),
+      organizationId,
+      actor: { type: 'user', id: camilleMartinId },
+      version: 1,
+      key: 'CAD-482',
+      spaceId: '01938f6e-0000-7000-8000-000000000076',
+      listId: '01938f6e-0000-7000-8000-000000000077',
+      parentKey: null,
+      name: 'Refondre l’écran de connexion SSO',
+      status: 'progress',
+      cancelReason: null,
+      priority: 'moyenne',
+      assigneeIds: [],
+      dueDate: null,
+      startDate: null,
+      estimateMinutes: null,
+      labels: [],
+      completedAt: null,
+    });
+    const publish = (payload: unknown) =>
+      compose(
+        'exec',
+        '-T',
+        'nats-streams',
+        'nats',
+        'pub',
+        'evt.task.created.v1',
+        JSON.stringify(payload),
+      );
+    publish(event);
+    const system = service().get(SystemTransactionRunner);
+    await vi.waitFor(
+      async () => {
+        const runs = await system.run(({ client }) =>
+          client.query(
+            `select id, status from automation_runs
+              where organization_id = $1 and rule_id = $2 and source_event_id = $3`,
+            [organizationId, ruleId, event.id],
+          ),
+        );
+        expect(runs.rows).toHaveLength(1);
+        const row = runs.rows[0] as { readonly id: string; readonly status: string };
+        expect(row.status).toBe('applied');
+        expect(taskCalls).toHaveLength(1);
+        expect(taskCalls[0]).toMatchObject({
+          path: '/internal/v1/tasks/CAD-482/automation-actions',
+          key: row.id,
+          body: { type: 'priority', priority: 'haute', ruleAuthorUserId: camilleMartinId },
+          principal: {
+            issuer: 'automation-service',
+            audience: 'task-service',
+            organizationId,
+            actor: { type: 'automation', id: ruleId },
+          },
+        });
+        const outbox = await system.run(({ client }) =>
+          client.query(
+            `select event_name from outbox_events
+              where organization_id = $1 and event_name = 'automation.executed.v1'`,
+            [organizationId],
+          ),
+        );
+        expect(outbox.rows).toEqual([{ event_name: 'automation.executed.v1' }]);
+      },
+      { timeout: 30_000, interval: 100 },
+    );
+    publish(event);
+    const loopEvent = { ...event, id: randomUUID(), actor: { type: 'automation', id: ruleId } };
+    publish(loopEvent);
+    await vi.waitFor(
+      async () => {
+        const receipts = await system.run(({ client }) =>
+          client.query(
+            `select event_id from processed_events
+              where consumer = 'automation-service__run-task-created-rules'
+                and event_id = any($1::uuid[])`,
+            [[event.id, loopEvent.id]],
+          ),
+        );
+        expect(receipts.rows).toHaveLength(2);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
+    const history = await request(service().getHttpServer())
+      .get('/internal/v1/automation-runs')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(200);
+    expect(history.body).toMatchObject({
+      items: [{ ruleId, taskKey: 'CAD-482', action: { type: 'priority', priority: 'haute' } }],
+      nextCursor: null,
+    });
+    expect((history.body as { readonly items: readonly unknown[] }).items).toHaveLength(1);
+    const [runs, outbox] = await Promise.all([
+      system.run(({ client }) =>
+        client.query('select id from automation_runs where organization_id = $1', [organizationId]),
+      ),
+      system.run(({ client }) =>
+        client.query(
+          `select id from outbox_events where organization_id = $1
+            and event_name = 'automation.executed.v1'`,
+          [organizationId],
+        ),
+      ),
+    ]);
+    expect(runs.rows).toHaveLength(1);
+    expect(outbox.rows).toHaveLength(1);
+    expect(taskCalls).toHaveLength(1);
   });
 
   it('publishes a pending event through the outbox relay', async () => {
