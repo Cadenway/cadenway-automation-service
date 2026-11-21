@@ -21,8 +21,8 @@ import { DeleteAutomationRule } from './application/use-cases/commands/rules/del
 import { SetAutomationRuleEnabled } from './application/use-cases/commands/rules/set-automation-rule-enabled/set-automation-rule-enabled.use-case.js';
 import { ListAutomationRules } from './application/use-cases/queries/rules/list-automation-rules/list-automation-rules.use-case.js';
 import { ListAutomationRunCandidates } from './application/use-cases/queries/runs/list-automation-run-candidates/list-automation-run-candidates.use-case.js';
+import { AutomationActionHttpAdapter } from './infrastructure/adapters/actions/automation-action-http.adapter.js';
 import { AutomationCursorAuthentication } from './infrastructure/adapters/cursors/automation-cursor-authentication.adapter.js';
-import { AutomationTaskHttpAdapter } from './infrastructure/adapters/task-service/automation-task-http.adapter.js';
 import { PgBossAutomationTriggerJobs } from './infrastructure/jobs/pg-boss/runs/pg-boss-automation-trigger-jobs.adapter.js';
 import { AutomationExecutedOutbox } from './infrastructure/messaging/outbox/runs/automation-executed-outbox.adapter.js';
 import { DrizzleAutomationRulesReader } from './infrastructure/persistence/drizzle/repositories/rules/drizzle-automation-rules.repository.js';
@@ -140,13 +140,24 @@ const vocabulary = { statuses: STATUS_KEYS, priorities: PRIORITY_KEYS };
           issuer: config.INTERNAL_TOKEN_ISSUER,
           privateJwk,
         });
-        const actions = new AutomationTaskHttpAdapter(
+        const notificationUrl = config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED
+          ? config.NOTIFICATION_SERVICE_URL
+          : undefined;
+        const actions = new AutomationActionHttpAdapter(
           new InternalHttpClient({
             service: 'task-service',
             baseUrl,
             signer,
             allowedUnavailableProblemCodes: ['task.action-unavailable'],
           }),
+          notificationUrl === undefined
+            ? undefined
+            : new InternalHttpClient({
+                service: 'notification-service',
+                baseUrl: notificationUrl,
+                signer,
+                allowedUnavailableProblemCodes: ['upstream.unavailable'],
+              }),
         );
         const outbox = new AutomationExecutedOutbox(outboxWriter);
         const work = new DrizzleAutomationRunsUnitOfWork(runner, vocabulary, (scope, run) =>

@@ -2,6 +2,7 @@ import {
   InternalHttpClient,
   InternalTokenSigner,
   InternalTokenVerifier,
+  ProblemException,
   runWithOrganizationContext,
 } from '@cadenway/nest-common';
 import { generateKeyPairSync } from 'node:crypto';
@@ -10,7 +11,7 @@ import { createServer, type IncomingHttpHeaders } from 'node:http';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import type { AutomationRun } from '../../../application/models/runs/automation-run.model.js';
-import { AutomationTaskHttpAdapter } from './automation-task-http.adapter.js';
+import { AutomationActionHttpAdapter } from './automation-action-http.adapter.js';
 
 const organizationId = '019a7000-1a2b-7c3d-8e4f-5a6b7c8d9e01';
 const ruleId = '019a7000-1a2b-7c3d-8e4f-5a6b7c8d9e02';
@@ -69,10 +70,11 @@ function problem(status: number, code: string): TaskResponse {
   };
 }
 
-async function withTaskServer(
+async function withActionServer(
   signer: InternalTokenSigner,
   reply: (attempt: number) => TaskResponse,
-  verify: (adapter: AutomationTaskHttpAdapter, calls: readonly TaskRequest[]) => Promise<void>,
+  verify: (adapter: AutomationActionHttpAdapter, calls: readonly TaskRequest[]) => Promise<void>,
+  extraActions = false,
 ): Promise<void> {
   const calls: TaskRequest[] = [];
   const server = createServer((request, response) => {
@@ -95,13 +97,22 @@ async function withTaskServer(
     const address = server.address();
     if (address === null || typeof address === 'string')
       throw new Error('Task test server did not bind.');
-    const http = new InternalHttpClient({
+    const baseUrl = `http://127.0.0.1:${String(address.port)}`;
+    const task = new InternalHttpClient({
       service: 'task-service',
-      baseUrl: `http://127.0.0.1:${String(address.port)}`,
+      baseUrl,
       allowedUnavailableProblemCodes: ['task.action-unavailable'],
       signer,
     });
-    await verify(new AutomationTaskHttpAdapter(http), calls);
+    const notification = extraActions
+      ? new InternalHttpClient({
+          service: 'notification-service',
+          baseUrl,
+          allowedUnavailableProblemCodes: ['upstream.unavailable'],
+          signer,
+        })
+      : undefined;
+    await verify(new AutomationActionHttpAdapter(task, notification), calls);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => {
@@ -112,9 +123,10 @@ async function withTaskServer(
   }
 }
 
-describe('AutomationTaskHttpAdapter', () => {
+describe('AutomationActionHttpAdapter', () => {
   let signer: InternalTokenSigner;
   let verifier: InternalTokenVerifier;
+  let notificationVerifier: InternalTokenVerifier;
 
   beforeAll(async () => {
     const issuer = 'automation-service';
@@ -126,10 +138,14 @@ describe('AutomationTaskHttpAdapter', () => {
       audience: 'task-service',
       trustedIssuers: { [issuer]: [publicJwk] },
     });
+    notificationVerifier = await InternalTokenVerifier.create({
+      audience: 'notification-service',
+      trustedIssuers: { [issuer]: [publicJwk] },
+    });
   });
 
   it('signs a generated priority request as its tenant and rule using the reserved command key', async () => {
-    await withTaskServer(
+    await withActionServer(
       signer,
       () => applied,
       async (adapter, calls) => {
@@ -177,7 +193,7 @@ describe('AutomationTaskHttpAdapter', () => {
       ...reservedRun,
       action: { type: 'assign', userId: recipientId },
     };
-    await withTaskServer(
+    await withActionServer(
       signer,
       () => response,
       async (adapter, calls) => {
@@ -192,7 +208,7 @@ describe('AutomationTaskHttpAdapter', () => {
   });
 
   it('keeps the signed command body and idempotency key stable across a temporary Task outage', async () => {
-    await withTaskServer(
+    await withActionServer(
       signer,
       (attempt) => (attempt <= 2 ? problem(503, 'task.action-unavailable') : applied),
       async (adapter, calls) => {
@@ -210,7 +226,7 @@ describe('AutomationTaskHttpAdapter', () => {
     { status: 404, code: 'task.not-found' },
     { status: 422, code: 'task.assignee-invalid' },
   ])('preserves $code as a refusal instead of completing a no-op', async ({ status, code }) => {
-    await withTaskServer(
+    await withActionServer(
       signer,
       () => problem(status, code),
       async (adapter, calls) => {
@@ -234,7 +250,7 @@ describe('AutomationTaskHttpAdapter', () => {
     },
     { name: 'malformed', response: { ...applied, body: '{' } },
   ])('refuses to settle from a $name Task receipt', async ({ response }) => {
-    await withTaskServer(
+    await withActionServer(
       signer,
       () => response,
       async (adapter) => {
@@ -243,8 +259,8 @@ describe('AutomationTaskHttpAdapter', () => {
     );
   });
 
-  it('makes no call for an unsupported, invalid or already cancelled action', async () => {
-    await withTaskServer(
+  it('makes no call for a disabled, invalid or already cancelled action', async () => {
+    await withActionServer(
       signer,
       () => applied,
       async (adapter, calls) => {
@@ -261,6 +277,121 @@ describe('AutomationTaskHttpAdapter', () => {
         await expect(adapter.execute(reservedRun, controller.signal)).rejects.toBe(reason);
         expect(calls).toEqual([]);
       },
+    );
+  });
+
+  it('dispatches a private comment receipt to Task with a canonical signed rule and no extra fields', async () => {
+    const body = 'Un passage en revue est nécessaire.';
+    await withActionServer(
+      signer,
+      () => applied,
+      async (adapter, calls) => {
+        await expect(
+          adapter.execute({
+            ...reservedRun,
+            ruleId: ruleId.toUpperCase(),
+            action: { type: 'comment', body },
+          }),
+        ).resolves.toBe('applied');
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({
+          method: 'POST',
+          path: '/internal/v1/tasks/CAD-482/automation-comments',
+          headers: { 'content-type': 'application/json', 'idempotency-key': runId },
+        });
+        expect(JSON.parse(calls[0]?.body ?? '')).toEqual({ ruleAuthorUserId, body });
+        const token = calls[0]?.headers.authorization?.replace(/^Bearer /u, '') ?? '';
+        await expect(verifier.verify(token)).resolves.toMatchObject({
+          audience: 'task-service',
+          organizationId,
+          actor: { type: 'automation', id: ruleId },
+        });
+      },
+      true,
+    );
+  });
+
+  it('uses a stable occurrence across Notification retries and preserves a suppressed notice', async () => {
+    const suppressed = { ...applied, body: '{"disposition":"no_op"}' };
+    await withActionServer(
+      signer,
+      (attempt) => (attempt <= 2 ? problem(503, 'upstream.unavailable') : suppressed),
+      async (adapter, calls) => {
+        const run: AutomationRun = {
+          ...reservedRun,
+          ruleId: ruleId.toUpperCase(),
+          action: { type: 'notify', userId: recipientId },
+        };
+        await expect(adapter.execute(run)).rejects.toMatchObject({
+          problem: { status: 503, code: 'upstream.unavailable' },
+        });
+        await expect(adapter.execute(run)).resolves.toBe('no_op');
+        expect(calls).toHaveLength(3);
+        for (const call of calls) {
+          expect(call).toMatchObject({
+            method: 'POST',
+            path: '/internal/v1/inbox/automation-notifications',
+            headers: { 'content-type': 'application/json', 'idempotency-key': runId },
+          });
+          expect(JSON.parse(call.body)).toEqual({
+            taskKey: 'CAD-482',
+            ruleAuthorUserId,
+            recipientUserId: recipientId,
+          });
+          const token = call.headers.authorization?.replace(/^Bearer /u, '') ?? '';
+          await expect(notificationVerifier.verify(token)).resolves.toMatchObject({
+            audience: 'notification-service',
+            organizationId,
+            actor: { type: 'automation', id: ruleId },
+          });
+        }
+      },
+      true,
+    );
+  });
+
+  it('preserves a downstream refusal while stripping its private contents', async () => {
+    const response = problem(404, 'notification.not-found');
+    const leaked = {
+      ...response,
+      body: JSON.stringify({
+        status: 404,
+        code: 'notification.not-found',
+        title: recipientId,
+        detail: ruleAuthorUserId,
+        details: { recipientUserId: recipientId },
+      }),
+    };
+    await withActionServer(
+      signer,
+      () => leaked,
+      async (adapter) => {
+        const run: AutomationRun = {
+          ...reservedRun,
+          action: { type: 'notify', userId: recipientId },
+        };
+        const error = await adapter.execute(run).catch((reason: unknown) => reason);
+        expect(error).toBeInstanceOf(ProblemException);
+        expect(error).toMatchObject({ problem: { status: 404, code: 'notification.not-found' } });
+        expect(error).toHaveProperty('cause', undefined);
+        expect(JSON.stringify(error)).not.toContain(recipientId);
+      },
+      true,
+    );
+  });
+
+  it('rejects a no-op for a comment because Task can only return applied', async () => {
+    await withActionServer(
+      signer,
+      () => ({ ...applied, body: '{"disposition":"no_op"}' }),
+      async (adapter) => {
+        const run: AutomationRun = {
+          ...reservedRun,
+          action: { type: 'comment', body: 'Commentaire valide.' },
+        };
+        await expect(adapter.execute(run)).rejects.toThrow('could not be confirmed');
+      },
+      true,
     );
   });
 });

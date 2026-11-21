@@ -33,6 +33,7 @@ describe('appConfigSchema', () => {
       INTERNAL_TOKEN_AUDIENCE: 'automation-service',
       INTERNAL_TOKEN_ISSUER: 'automation-service',
       AUTOMATION_TASK_TRIGGERS_ENABLED: false,
+      AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED: false,
       INTERNAL_TOKEN_TRUSTED_ISSUERS: {
         'api-gateway': [
           {
@@ -65,6 +66,25 @@ describe('appConfigSchema', () => {
     expect(config.error.issues.map((issue) => issue.path[0])).toEqual([
       'INTERNAL_TOKEN_PRIVATE_JWK',
       'TASK_SERVICE_URL',
+    ]);
+  });
+
+  it('keeps comment and notification dispatch disabled with an unset optional URL', () => {
+    const config = loadConfig(appConfigSchema, { ...complete, NOTIFICATION_SERVICE_URL: '' });
+    expect(config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED).toBe(false);
+    expect(config.NOTIFICATION_SERVICE_URL).toBeUndefined();
+  });
+
+  it('requires Task triggers and the Notification URL to enable the two new actions', () => {
+    const config = appConfigSchema.safeParse({
+      ...complete,
+      AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED: 'true',
+      NOTIFICATION_SERVICE_URL: '',
+    });
+    if (config.success) throw new Error('Expected config validation to fail.');
+    expect(config.error.issues.map((issue) => issue.path[0])).toEqual([
+      'AUTOMATION_TASK_TRIGGERS_ENABLED',
+      'NOTIFICATION_SERVICE_URL',
     ]);
   });
 
