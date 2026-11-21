@@ -57,6 +57,19 @@ export type AutomationTaskActionCommand =
   AutomationTaskAssignCommand | AutomationTaskPriorityCommand;
 
 /**
+ * Markdown of 1 to 5,000 Unicode code points, not whitespace only; stored unchanged.
+ * @minLength 1
+ * @maxLength 5000
+ * @pattern \S
+ */
+export type Body = string;
+
+export interface AutomationTaskCommentCommand {
+  ruleAuthorUserId: AutomationRuleAuthorUserId;
+  body: Body;
+}
+
+/**
  * A committed Task write or a completed command with no change, including when replayed.
  */
 export type TaskActionReceiptDisposition =
@@ -157,15 +170,58 @@ export type AutomationTaskActionRefusedResponse = Problem;
  */
 export type TaskActionUnavailableResponse = Problem;
 
+export type AutomationTaskCommentReceiptResponse = {
+  disposition: 'applied';
+};
+
+/**
+ * `request.invalid`: the request does not match the schema; one `details.issues` entry per issue.
+ */
+export type AutomationTaskBadRequestResponse = Problem;
+
+/**
+ * The internal token is missing (`auth.token-missing`) or refused (`auth.token-invalid`,
+ * with `details.reason`).
+ */
+export type AutomationTaskInternalTokenRefusedResponse = Problem;
+
+/**
+ * The internal token is valid but the route does not accept its issuer
+ * (`auth.issuer-not-allowed`) or its actor (`auth.actor-not-allowed`), or it carries no
+ * organization (`auth.organization-required`).
+ */
+export type AutomationTaskInternalAccessRefusedResponse = Problem;
+
+/**
+ * `task.not-found` for a missing, inactive, cross-tenant or unauthorized target, including
+ * its current parent scope. All cases return the same problem without resource details.
+ */
+export type AutomationTaskCommentTargetUnavailableResponse = Problem;
+
+/**
+ * `idempotency.request-in-progress`: a request with the same `Idempotency-Key` still runs.
+ */
+export type AutomationTaskCommentInProgressResponse = Problem;
+
+/**
+ * `idempotency.key-reused`: the `Idempotency-Key` was sent before with another body.
+ */
+export type AutomationTaskCommentKeyReusedResponse = Problem;
+
+/**
+ * `task.action-unavailable` when Task cannot verify current authorization or complete the
+ * command transaction. Retry with the same key. The problem omits resource details.
+ */
+export type AutomationTaskCommentUnavailableResponse = Problem;
+
 /**
  * Stable command identity derived from the normalized Git delivery or triggering Task event,
  * reused on every retry and redelivery for this actor, operation and task. Use an opaque
- * value without raw provider headers or payload. The receipt is scoped to the signed
- * organization, issuer, actor, operation, task key and this value. Recheck current target
- * authorization before returning an execution receipt. A different body for the scoped key
- * is refused. Task retains receipts for at least 24 hours, covering the entire window in
- * which callers retry this command. Callers keep their own durable delivery deduplication
- * and do not send a previously submitted command again after that window.
+ * value without raw provider headers or payload. Reserve a distinct value for each command
+ * within the signed organization and actor. Reusing a value for a different operation,
+ * task key or body is refused. Task rechecks current target authorization before returning
+ * an execution receipt and retains receipts for at least 24 hours. Callers keep their own
+ * durable delivery deduplication and do not resend a submitted command after that window.
  */
 export type TaskActionIdempotencyKeyParameter = string;
 
@@ -256,9 +312,9 @@ export const getTaskServiceInternalRoutes = (fetchFn: typeof globalThis.fetch = 
    * an existing eligible assignee yields `no_op`. A change commits the command receipt, write,
    * activity and usual task outbox entries together.
    *
-   * This command accepts only `assign` and `priority`. A notification needs a separate
-   * Notification command with current task visibility for its recipient. An automatic comment
-   * needs a comment contract that can represent and enforce a rule's authorship and moderation.
+   * This command accepts only `assign` and `priority`. Automatic comments have their own
+   * Task command. Notification handles the `notify` action and checks current task access
+   * through the automation notification authorization operation.
    * @summary Apply an enabled rule's task action to the task in its triggering event
    */
   const applyAutomationTaskActionInternal = async (
@@ -283,7 +339,60 @@ export const getTaskServiceInternalRoutes = (fetchFn: typeof globalThis.fetch = 
     } as applyAutomationTaskActionInternalResponse;
   };
 
-  return { applyAutomationTaskActionInternal, getApplyAutomationTaskActionInternalUrl };
+  const getApplyAutomationTaskCommentInternalUrl = (taskKey: string) => {
+    return `/internal/v1/tasks/${taskKey}/automation-comments`;
+  };
+
+  /**
+   * Requires signed issuer `automation-service`, audience `task-service`, an organization
+   * and an `automation` actor whose ID is the rule UUIDv7. Automation binds the command to
+   * the task key and organization of a validated `task.created.v1` or `task.status-changed.v1`
+   * event, ignores automation-authored status events, and selects the action and recorded
+   * author of its current enabled rule in that organization.
+   *
+   * Task uses the signed organization only. It checks current rule-author membership and
+   * effective `edit` access on the active task and its active parent scope before any
+   * receipt lookup or replay. The write transaction locks and rechecks those conditions.
+   * The signed rule is the author of the comment, its activity and its event. On ordinary
+   * comment reads, it has `actor.type: automation`, `mentions: []` and
+   * `replyToCommentId: null`. The rule author's account ID serves only as authorization
+   * evidence and is not exposed as the comment author. A human task editor who also manages
+   * the current space may delete the comment through the ordinary moderation path.
+   *
+   * The comment, task version, comment activity, text-free `comment.created.v1` event with
+   * current eligible watchers, and command receipt commit together. A replay returns the
+   * recorded disposition without repeating those changes or recreating a moderated comment.
+   * All responses send `Cache-Control: private, no-store`.
+   * @summary Apply an enabled rule's comment action to its triggering task
+   */
+  const applyAutomationTaskCommentInternal = async (
+    taskKey: string,
+    automationTaskCommentCommand: AutomationTaskCommentCommand,
+    options?: RequestInit,
+  ): Promise<applyAutomationTaskCommentInternalResponse> => {
+    const res = await fetchFn(getApplyAutomationTaskCommentInternalUrl(taskKey), {
+      ...options,
+      method: 'POST',
+      headers: getHeaders({ 'Content-Type': 'application/json' }, options?.headers),
+      body: JSON.stringify(automationTaskCommentCommand),
+    });
+
+    const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+    const data: applyAutomationTaskCommentInternalResponse['data'] = body ? JSON.parse(body) : {};
+    return {
+      data,
+      status: res.status,
+      headers: res.headers,
+    } as applyAutomationTaskCommentInternalResponse;
+  };
+
+  return {
+    applyAutomationTaskActionInternal,
+    getApplyAutomationTaskActionInternalUrl,
+    applyAutomationTaskCommentInternal,
+    getApplyAutomationTaskCommentInternalUrl,
+  };
 };
 
 export type applyAutomationTaskActionInternalResponse200 = {
@@ -344,3 +453,63 @@ export type applyAutomationTaskActionInternalResponseError = (
 
 export type applyAutomationTaskActionInternalResponse =
   applyAutomationTaskActionInternalResponseSuccess | applyAutomationTaskActionInternalResponseError;
+
+export type applyAutomationTaskCommentInternalResponse200 = {
+  data: AutomationTaskCommentReceiptResponse;
+  status: 200;
+};
+
+export type applyAutomationTaskCommentInternalResponse400 = {
+  data: AutomationTaskBadRequestResponse;
+  status: 400;
+};
+
+export type applyAutomationTaskCommentInternalResponse401 = {
+  data: AutomationTaskInternalTokenRefusedResponse;
+  status: 401;
+};
+
+export type applyAutomationTaskCommentInternalResponse403 = {
+  data: AutomationTaskInternalAccessRefusedResponse;
+  status: 403;
+};
+
+export type applyAutomationTaskCommentInternalResponse404 = {
+  data: AutomationTaskCommentTargetUnavailableResponse;
+  status: 404;
+};
+
+export type applyAutomationTaskCommentInternalResponse409 = {
+  data: AutomationTaskCommentInProgressResponse;
+  status: 409;
+};
+
+export type applyAutomationTaskCommentInternalResponse422 = {
+  data: AutomationTaskCommentKeyReusedResponse;
+  status: 422;
+};
+
+export type applyAutomationTaskCommentInternalResponse503 = {
+  data: AutomationTaskCommentUnavailableResponse;
+  status: 503;
+};
+
+export type applyAutomationTaskCommentInternalResponseSuccess =
+  applyAutomationTaskCommentInternalResponse200 & {
+    headers: Headers;
+  };
+export type applyAutomationTaskCommentInternalResponseError = (
+  | applyAutomationTaskCommentInternalResponse400
+  | applyAutomationTaskCommentInternalResponse401
+  | applyAutomationTaskCommentInternalResponse403
+  | applyAutomationTaskCommentInternalResponse404
+  | applyAutomationTaskCommentInternalResponse409
+  | applyAutomationTaskCommentInternalResponse422
+  | applyAutomationTaskCommentInternalResponse503
+) & {
+  headers: Headers;
+};
+
+export type applyAutomationTaskCommentInternalResponse =
+  | applyAutomationTaskCommentInternalResponseSuccess
+  | applyAutomationTaskCommentInternalResponseError;

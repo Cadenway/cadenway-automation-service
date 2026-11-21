@@ -41,6 +41,8 @@ import { z } from 'zod';
  * `AUTOMATION_TASK_TRIGGERS_ENABLED` starts the Task subscriptions and job worker. It is off
  * until both Task and the broker permissions are available. Enabling it requires the Automation
  * signing key and `TASK_SERVICE_URL`.
+ * `AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED` starts dispatching these two action
+ * types once both owners are available. It requires Task triggers and `NOTIFICATION_SERVICE_URL`.
  *
  * @type {BaseConfig & DatabaseConfig & MessagingConfig & InternalTokenVerifierConfig}
  */
@@ -51,9 +53,11 @@ export type AppConfig = BaseConfig &
   Pick<InternalTokenSignerConfig, 'INTERNAL_TOKEN_ISSUER'> & {
     readonly AUTOMATION_CURSOR_SIGNING_KEY?: string | undefined;
     readonly AUTOMATION_TASK_TRIGGERS_ENABLED: boolean;
+    readonly AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED: boolean;
     readonly INTERNAL_TOKEN_PRIVATE_JWK?:
       InternalTokenSignerConfig['INTERNAL_TOKEN_PRIVATE_JWK'] | undefined;
     readonly TASK_SERVICE_URL?: string | undefined;
+    readonly NOTIFICATION_SERVICE_URL?: string | undefined;
   };
 
 /**
@@ -77,7 +81,15 @@ export const appConfigSchema: z.ZodType<AppConfig> = z
     INTERNAL_TOKEN_PRIVATE_JWK:
       internalTokenSignerConfigShape.INTERNAL_TOKEN_PRIVATE_JWK.optional(),
     TASK_SERVICE_URL: z.url({ protocol: /^https?$/u }).optional(),
+    NOTIFICATION_SERVICE_URL: z
+      .union([z.url({ protocol: /^https?$/u }), z.literal('')])
+      .transform((value) => value || undefined)
+      .optional(),
     AUTOMATION_TASK_TRIGGERS_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED: z
       .enum(['true', 'false'])
       .default('false')
       .transform((value) => value === 'true'),
@@ -87,6 +99,22 @@ export const appConfigSchema: z.ZodType<AppConfig> = z
       .optional(),
   })
   .superRefine((config, ctx) => {
+    if (config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED) {
+      if (!config.AUTOMATION_TASK_TRIGGERS_ENABLED) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['AUTOMATION_TASK_TRIGGERS_ENABLED'],
+          message: 'Task triggers must be enabled for comment and notification actions.',
+        });
+      }
+      if (config.NOTIFICATION_SERVICE_URL === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['NOTIFICATION_SERVICE_URL'],
+          message: 'Required for automation notification actions.',
+        });
+      }
+    }
     if (!config.AUTOMATION_TASK_TRIGGERS_ENABLED) return;
     for (const name of ['INTERNAL_TOKEN_PRIVATE_JWK', 'TASK_SERVICE_URL'] as const) {
       if (config[name] === undefined) {

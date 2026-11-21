@@ -51,6 +51,13 @@ for the published `evt.task.created.v1` and `evt.task.status-changed.v1` subject
 starts at newly published events. Existing consumers retain their position. Activation is off by
 default and requires the broker permissions and compatible downstream action endpoints.
 
+Assignment and priority use the Task action endpoint. Comment and notification dispatch also
+requires `AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED=true` and
+`NOTIFICATION_SERVICE_URL`. Enable this on every worker replica after Task's comment and
+notification-authorization endpoints and Notification's in-app command are available with their
+issuer trust configured. These actions only enter history if their owners confirm an applied
+receipt. A suppressed in-app notification settles as a no-op.
+
 Invalid events are dead-lettered in JetStream. A failing admission has five attempts with
 delays of 1 second, 5 seconds, 30 seconds and 2 minutes. Queued work gets five attempts with
 delays starting at 15 seconds and capped at 2 minutes. The worker checks the one-hour window
@@ -91,7 +98,7 @@ Automation commits the successful execution and its outbox row together.
 
 - Under Decision A, Automation uses generated clients from published contracts for direct action
   commands to Task and Notification. It signs each call for the target service with the
-  `automation` actor type and the rule ID. The receiving service owns action authorization and
+  `automation` actor type and the lowercase rule UUID. The receiving service owns action authorization and
   its data writes.
 - The gateway routes authorized reads. Task supplies current visibility for the public run
   history. Automation has no direct cross-service read path.

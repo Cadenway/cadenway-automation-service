@@ -15,6 +15,7 @@ export default defineConfig(
     '.claude/',
     '.codex/',
     'src/modules/automations/infrastructure/adapters/task-service/generated/task-service.ts',
+    'src/modules/automations/infrastructure/adapters/notification-service/generated/notification-service.ts',
   ]),
   eslint.configs.recommended,
   tseslint.configs.strictTypeChecked,

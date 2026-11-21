@@ -121,6 +121,30 @@ describe('ExecuteAutomationRule', () => {
     expect(transaction.appendExecuted).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { type: 'comment', body: 'Le sprint est prêt pour la revue.' },
+    { type: 'notify', userId: authorId },
+  ] as const)(
+    'retries a reserved $type with the original action and execution identity after a lost response',
+    async (reservedAction) => {
+      const { transaction, work, actions } = setup();
+      const reserved: AutomationRun = { ...pending, action: reservedAction };
+      vi.mocked(transaction.findBySource).mockResolvedValue(reserved);
+      vi.mocked(actions.execute).mockRejectedValueOnce(new Error('response lost'));
+      const command = new ExecuteAutomationRule(work, actions, () => time);
+
+      await expect(command.execute(input)).rejects.toThrow('response lost');
+      expect(transaction.settle).not.toHaveBeenCalled();
+      await expect(command.execute(input)).resolves.toEqual({ status: 'applied', runId });
+
+      expect(actions.execute).toHaveBeenCalledTimes(2);
+      expect(actions.execute).toHaveBeenNthCalledWith(1, reserved, undefined);
+      expect(actions.execute).toHaveBeenNthCalledWith(2, reserved, undefined);
+      expect(transaction.reserve).not.toHaveBeenCalled();
+      expect(transaction.appendExecuted).toHaveBeenCalledOnce();
+    },
+  );
+
   it('finds a concurrent reservation after acquiring a rule lock', async () => {
     const { transaction, work, actions } = setup();
     vi.mocked(transaction.findBySource).mockResolvedValueOnce(null).mockResolvedValueOnce(pending);
