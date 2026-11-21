@@ -11,6 +11,7 @@ export function mapAutomationRule(
     {
       ruleId: row.id,
       organizationId: row.organizationId,
+      ruleAuthorUserId: row.ruleAuthorUserId,
       trigger: row.trigger,
       action: row.action,
       enabled: row.enabled,

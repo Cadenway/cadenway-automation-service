@@ -77,6 +77,7 @@ describe('automation rule persistence', () => {
             {
               ...identity,
               organizationId: organization,
+              ruleAuthorUserId: '019a5f3c-a0b1-7c2d-9e3f-5a6b7c8d9e32',
               trigger: { type: 'created' },
               action: { type: 'priority', priority: 'high' },
             },

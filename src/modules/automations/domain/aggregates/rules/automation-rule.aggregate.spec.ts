@@ -13,6 +13,7 @@ const camille = '019a5f3c-a0b1-7c2d-9e3f-5a6b7c8d9e32';
 const definition = {
   ruleId: '019a700b-1a2b-7c3d-8e4f-5a6b7c8d9e01',
   organizationId: atelierNord,
+  ruleAuthorUserId: camille,
   trigger: { type: 'created' },
   action: { type: 'assign', userId: camille },
   createdAt: new Date('2026-11-20T08:00:00Z'),
@@ -52,6 +53,18 @@ describe('AutomationRule', () => {
       enabled: true,
       version: 1,
     });
+  });
+
+  it('keeps the authenticated author as a canonical account UUIDv7', () => {
+    const uppercaseAuthor = camille.toUpperCase();
+    expect(
+      createRule({ ...definition, ruleAuthorUserId: uppercaseAuthor }).snapshot(),
+    ).toMatchObject({
+      ruleAuthorUserId: camille,
+    });
+    expect(() => createRule({ ...definition, ruleAuthorUserId: 'provenance-free' })).toThrow(
+      'invalid-rule-author',
+    );
   });
 
   it('preserves a stored rule and advances only on a different enabled value', () => {

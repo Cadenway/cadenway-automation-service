@@ -67,6 +67,7 @@ export class DrizzleAutomationRulesUnitOfWork implements AutomationRulesUnitOfWo
           await scope.db.insert(automationRules).values({
             organizationId,
             id: state.ruleId,
+            ruleAuthorUserId: state.ruleAuthorUserId,
             trigger: state.trigger,
             action: state.action,
             enabled: state.enabled,

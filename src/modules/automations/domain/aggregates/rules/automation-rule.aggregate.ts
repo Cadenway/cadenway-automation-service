@@ -5,7 +5,7 @@ import type { AutomationTaskVocabulary } from '../../value-objects/rules/automat
 import type { AutomationTriggerFact } from '../../value-objects/rules/automation-trigger-fact.value-object.js';
 import { makeAutomationTrigger } from '../../value-objects/rules/automation-trigger.value-object.js';
 
-const ruleId = /^[\da-f]{8}-[\da-f]{4}-7[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/iu;
+const uuidV7 = /^[\da-f]{8}-[\da-f]{4}-7[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/iu;
 const organizationId = /^[\da-f]{8}-[\da-f]{4}-[1-8][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/iu;
 
 /** Owns a workspace rule configured in the Automations dialog. */
@@ -29,10 +29,11 @@ export class AutomationRule {
     state: AutomationRuleState,
     vocabulary: AutomationTaskVocabulary,
   ): AutomationRule {
-    if (!ruleId.test(state.ruleId)) throw new AutomationRuleError('invalid-rule-id');
+    if (!uuidV7.test(state.ruleId)) throw new AutomationRuleError('invalid-rule-id');
     if (!organizationId.test(state.organizationId)) {
       throw new AutomationRuleError('invalid-organization-id');
     }
+    if (!uuidV7.test(state.ruleAuthorUserId)) throw new AutomationRuleError('invalid-rule-author');
     if (!Number.isFinite(state.createdAt.getTime())) {
       throw new AutomationRuleError('invalid-creation-time');
     }
@@ -43,6 +44,7 @@ export class AutomationRule {
     return new AutomationRule({
       ruleId: state.ruleId.toLowerCase(),
       organizationId: state.organizationId.toLowerCase(),
+      ruleAuthorUserId: state.ruleAuthorUserId.toLowerCase(),
       trigger: makeAutomationTrigger(state.trigger, vocabulary.statuses),
       action: makeAutomationAction(state.action, vocabulary.priorities),
       enabled: state.enabled,

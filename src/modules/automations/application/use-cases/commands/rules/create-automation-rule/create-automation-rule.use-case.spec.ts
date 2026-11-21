@@ -14,6 +14,7 @@ const userId = '019a5f3c-a0b1-7c2d-9e3f-5a6b7c8d9e32';
 const vocabulary = { statuses: ['todo'], priorities: ['high'] };
 const definition = {
   organizationId,
+  ruleAuthorUserId: userId,
   ruleId,
   createdAt: new Date('2026-11-20T08:05:00Z'),
   trigger: { type: 'created' } as const,
@@ -52,13 +53,14 @@ describe('automation rule writes', () => {
 
     const result = await command.execute({
       organizationId,
+      ruleAuthorUserId: userId,
       trigger: definition.trigger,
       action: definition.action,
     });
 
     expect(result).toMatchObject({
       status: 'created',
-      rule: { ruleId, version: 1, enabled: true },
+      rule: { ruleId, ruleAuthorUserId: userId, version: 1, enabled: true },
     });
     expect(recipients.isActiveRecipient).toHaveBeenCalledWith(organizationId, userId);
     expect(transaction.insert).toHaveBeenCalledOnce();
@@ -71,6 +73,7 @@ describe('automation rule writes', () => {
     await expect(
       new CreateAutomationRule(work, vocabulary, recipients).execute({
         organizationId,
+        ruleAuthorUserId: userId,
         trigger: definition.trigger,
         action: definition.action,
       }),
@@ -85,6 +88,7 @@ describe('automation rule writes', () => {
     await expect(
       new CreateAutomationRule(work, vocabulary, recipients).execute({
         organizationId,
+        ruleAuthorUserId: userId,
         trigger: definition.trigger,
         action: definition.action,
       }),

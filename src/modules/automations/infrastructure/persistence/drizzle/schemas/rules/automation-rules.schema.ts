@@ -23,6 +23,7 @@ export const automationRules = pgTable(
     id: uuid('id')
       .notNull()
       .default(sql`uuidv7()`),
+    ruleAuthorUserId: uuid('rule_author_user_id').notNull(),
     trigger: jsonb('trigger').$type<AutomationTrigger>().notNull(),
     action: jsonb('action').$type<AutomationAction>().notNull(),
     enabled: boolean('enabled').notNull().default(true),

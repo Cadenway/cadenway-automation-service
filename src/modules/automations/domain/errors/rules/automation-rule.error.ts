@@ -3,6 +3,7 @@ abstract class DomainError extends Error {}
 type RuleRefusal =
   | 'invalid-rule-id'
   | 'invalid-organization-id'
+  | 'invalid-rule-author'
   | 'invalid-creation-time'
   | 'invalid-version'
   | 'invalid-trigger'

@@ -1,6 +1,7 @@
 import { CONFIG, ConfigModule, HealthModule, postgresIndicator } from '@cadenway/nest-common';
 import type { PostgresProbe } from '@cadenway/nest-common';
 import { DATABASE_POOL, DatabaseModule } from '@cadenway/nest-common/database';
+import { JobsRuntimeModule } from '@cadenway/nest-jobs/runtime';
 import {
   MessagingConnection,
   MessagingModule,
@@ -11,6 +12,7 @@ import { Module } from '@nestjs/common';
 
 import { appConfigSchema } from './config/app-config.js';
 import type { AppConfig } from './config/app-config.js';
+import { AUTOMATION_TASK_TRIGGER_QUEUE } from './config/job-queues.js';
 import { AutomationsModule } from './modules/automations/automations.module.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
 
@@ -74,6 +76,17 @@ import { PlatformModule } from './modules/platform/platform.module.js';
       }),
     }),
     OutboxModule.forRoot(),
+    JobsRuntimeModule.forRootAsync({
+      inject: [CONFIG],
+      useFactory: (config: AppConfig) => ({
+        connection: { connectionString: config.DATABASE_URL },
+        queues: [AUTOMATION_TASK_TRIGGER_QUEUE],
+        // Scheduler capability also recovers timed-out attempts and supervises dead letters.
+        capabilities: ['producer', 'worker', 'scheduler'],
+        poolSize: 2,
+        shutdownTimeoutMs: 8_000,
+      }),
+    }),
     HealthModule.forRootAsync({
       inject: [DATABASE_POOL, MessagingConnection],
       useFactory: (pool: PostgresProbe, connection: MessagingConnection) => ({

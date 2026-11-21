@@ -5,21 +5,20 @@
 Owns organization-scoped rules and the history of their applied actions. Task owns task state and
 task visibility. Notification owns notification delivery.
 
-The current milestone registers the module and adds the rule domain. The API, event handlers,
-execution storage and action clients below describe the P6 runtime that follows contract publication.
-
 ## Public entry points
 
 None.
 
 ## Owned tables
 
-None in this milestone. P6 persistence will store rules, execution identities and applied actions
-in this service's database with row-level security forced by organization.
+- `automation_rules` owns immutable conditions, actions and the account that created each rule.
+- `automation_runs` owns execution identities and action snapshots. Only applied runs appear in history.
+
+Both tables use forced organization row-level security.
 
 ## API
 
-The draft internal OpenAPI contract defines these operations:
+The internal API registers five operations from the published OpenAPI contract.
 
 | Method and path                            | Operation ID                          |
 | ------------------------------------------ | ------------------------------------- |
@@ -29,27 +28,37 @@ The draft internal OpenAPI contract defines these operations:
 | `DELETE /internal/v1/automations/{ruleId}` | `deleteAutomationRuleInternal`        |
 | `GET /internal/v1/automation-runs`         | `listAutomationRunCandidatesInternal` |
 
-The gateway checks current owner or administrator membership with Organization before calling
+The gateway must check current owner or administrator membership with Organization before calling
 these operations. Automation checks the signed gateway issuer, service audience, user actor and
-organization, then scopes every lookup and write to that tenant. Creating an assignment or
-notification rule requires an active recipient in that organization.
+organization, then scopes every lookup and write to that tenant. Assignment and notification
+rules require a signed proof of current recipient eligibility before creation or replay.
 
-The internal history pages through a window of at most 100 recent applied actions. Its cursor
-binds the actor, organization, operation and window. For the public history, the gateway checks
-each task's current visibility with Task as the requesting user and returns up to eight visible
-executions from that window.
+The internal history pages through a window of at most 100 recent applied actions. The
+authenticated cursor binds the actor, organization, operation and window. The public history
+requires the gateway to check each task's current visibility with Task as the requesting user and
+return up to eight visible executions from that window.
 
 ## Events emitted
 
-The draft AsyncAPI contract defines `evt.automation.executed.v1` for a successfully applied action.
-Its actor has type `automation` and its ID is the rule ID. The outbox relay delivers the fact at
-least once. The planned Billing consumer can deduplicate it by event ID.
+The outbox emits `evt.automation.executed.v1` only for a successfully applied action. Its actor
+has type `automation` and its ID is the rule ID. Consumers deduplicate deliveries by event ID.
 
 ## Events consumed
 
-The P6 runtime will consume `evt.task.created.v1` and `evt.task.status-changed.v1` from Task.
-The installed contracts and registered handlers will determine the exact message validation and
-durable consumer bindings.
+When `AUTOMATION_TASK_TRIGGERS_ENABLED` is enabled, the service registers
+`automation-service__run-task-created-rules` and `automation-service__run-task-status-changed-rules`
+for the published `evt.task.created.v1` and `evt.task.status-changed.v1` subjects. First activation
+starts at newly published events. Existing consumers retain their position. Activation is off by
+default and requires the broker permissions and compatible downstream action endpoints.
+
+Invalid events are dead-lettered in JetStream. A failing admission has five attempts with
+delays of 1 second, 5 seconds, 30 seconds and 2 minutes. Queued work gets five attempts with
+delays starting at 15 seconds and capped at 2 minutes. The worker checks the one-hour window
+from the source fact at the start of each attempt, before contacting a downstream service.
+The queue retains ready work for 48 hours so a resumed worker can record the expired attempt in
+its dead-letter queue. Operators inspect failed work and reconcile the action with its owner
+before retrying an ambiguous outcome. Work past the action window requires reconciliation
+without an automatic replay.
 
 ## Invariants
 
@@ -58,19 +67,25 @@ durable consumer bindings.
 - Events from an `automation` actor are ignored to prevent action-triggered loops. Disabled or
   deleted rules are ineligible for new trigger decisions. An unchanged enablement keeps the
   current rule version.
+- A continuation advances through the tenant's rules by creation time and ID in pages of up to 32. Only rules already created when the fact occurred are eligible. Independent status
+  transitions are evaluated by source event ID, regardless of arrival order.
 - The tenant, rule and triggering event identify one execution across retries. Only applied
   actions enter history and emit an execution fact. A no-op, skipped or failed action does not.
+- A rule's delegation is recorded from the authenticated creator. The receiving service checks
+  that this account still has the required authority before it applies an action.
 
 ## Transactions
 
-The planned write use cases own the tenant transaction. Creating a rule uses the kit's
+The write use cases own the tenant transaction. Creating a rule uses the kit's
 actor-and-tenant-scoped idempotency when the caller supplies a key. Enablement and deletion check
 `If-Match`, when present, within the write transaction.
 
-The event handler durably records the trigger receipt and execution identity before handing the
-action off. The application calls the downstream owner outside its database transaction and
-reuses the execution identity as the retry key. After the downstream owner confirms the action
-was applied, Automation commits the successful execution and its outbox row together.
+The broker deduplicator commits the event receipt and the initial fanout job together. A fanout
+job commits the page's action jobs and continuation together. Occurrence keys use the source
+event ID plus the page position or rule ID. An action worker reserves its execution identity in
+its own transaction and uses that identity as the downstream idempotency key. The downstream
+call runs outside PostgreSQL transactions. After the owner confirms it applied the action,
+Automation commits the successful execution and its outbox row together.
 
 ## Decisions
 

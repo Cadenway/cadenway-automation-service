@@ -10,6 +10,9 @@ export interface AutomationRuleState {
   /** Organization that owns the rule. */
   readonly organizationId: string;
 
+  /** Account whose authority the rule delegates to an action. */
+  readonly ruleAuthorUserId: string;
+
   /** Task condition required to consider the action. */
   readonly trigger: AutomationTrigger;
 

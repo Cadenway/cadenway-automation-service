@@ -1,5 +1,13 @@
-import { baseConfigShape, internalTokenVerifierConfigShape } from '@cadenway/nest-common';
-import type { BaseConfig, InternalTokenVerifierConfig } from '@cadenway/nest-common';
+import {
+  baseConfigShape,
+  internalTokenSignerConfigShape,
+  internalTokenVerifierConfigShape,
+} from '@cadenway/nest-common';
+import type {
+  BaseConfig,
+  InternalTokenSignerConfig,
+  InternalTokenVerifierConfig,
+} from '@cadenway/nest-common';
 import { databaseConfigShape } from '@cadenway/nest-common/database';
 import type { DatabaseConfig } from '@cadenway/nest-common/database';
 import { messagingConfigShape } from '@cadenway/nest-messaging';
@@ -26,16 +34,27 @@ import { z } from 'zod';
  *   without them.
  * - `INTERNAL_TOKEN_AUDIENCE` and `INTERNAL_TOKEN_TRUSTED_ISSUERS`: the `aud` this service accepts
  *   and the public keys of the backends allowed to call it.
+ * - `AUTOMATION_CURSOR_SIGNING_KEY`: dedicated 32-byte hexadecimal key for authenticated
+ *   pagination. Continuations require this key.
  *
  * `OTEL_EXPORTER_OTLP_ENDPOINT` is read by `telemetry.ts`, before the application exists.
- * `INTERNAL_TOKEN_ISSUER`, `INTERNAL_TOKEN_PRIVATE_JWK`, `TASK_SERVICE_URL` and
- * `NOTIFICATION_SERVICE_URL` are set for the calls of this service to task-service and
- * notification-service and read by nothing until the first one is written; the signer shape of the
- * kit joins this schema then, since `.env.example` cannot carry the private key it requires.
+ * `AUTOMATION_TASK_TRIGGERS_ENABLED` starts the Task subscriptions and job worker. It is off
+ * until both Task and the broker permissions are available. Enabling it requires the Automation
+ * signing key and `TASK_SERVICE_URL`.
  *
  * @type {BaseConfig & DatabaseConfig & MessagingConfig & InternalTokenVerifierConfig}
  */
-export type AppConfig = BaseConfig & DatabaseConfig & MessagingConfig & InternalTokenVerifierConfig;
+export type AppConfig = BaseConfig &
+  DatabaseConfig &
+  MessagingConfig &
+  InternalTokenVerifierConfig &
+  Pick<InternalTokenSignerConfig, 'INTERNAL_TOKEN_ISSUER'> & {
+    readonly AUTOMATION_CURSOR_SIGNING_KEY?: string | undefined;
+    readonly AUTOMATION_TASK_TRIGGERS_ENABLED: boolean;
+    readonly INTERNAL_TOKEN_PRIVATE_JWK?:
+      InternalTokenSignerConfig['INTERNAL_TOKEN_PRIVATE_JWK'] | undefined;
+    readonly TASK_SERVICE_URL?: string | undefined;
+  };
 
 /**
  * Constant appConfigSchema
@@ -48,12 +67,37 @@ export type AppConfig = BaseConfig & DatabaseConfig & MessagingConfig & Internal
  *
  * @type {z.ZodType<AppConfig>}
  */
-export const appConfigSchema: z.ZodType<AppConfig> = z.object({
-  ...baseConfigShape,
-  ...databaseConfigShape,
-  ...messagingConfigShape,
-  ...internalTokenVerifierConfigShape,
-});
+export const appConfigSchema: z.ZodType<AppConfig> = z
+  .object({
+    ...baseConfigShape,
+    ...databaseConfigShape,
+    ...messagingConfigShape,
+    ...internalTokenVerifierConfigShape,
+    INTERNAL_TOKEN_ISSUER: z.literal('automation-service').default('automation-service'),
+    INTERNAL_TOKEN_PRIVATE_JWK:
+      internalTokenSignerConfigShape.INTERNAL_TOKEN_PRIVATE_JWK.optional(),
+    TASK_SERVICE_URL: z.url({ protocol: /^https?$/u }).optional(),
+    AUTOMATION_TASK_TRIGGERS_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    AUTOMATION_CURSOR_SIGNING_KEY: z
+      .string()
+      .regex(/^[\da-f]{64}$/iu)
+      .optional(),
+  })
+  .superRefine((config, ctx) => {
+    if (!config.AUTOMATION_TASK_TRIGGERS_ENABLED) return;
+    for (const name of ['INTERNAL_TOKEN_PRIVATE_JWK', 'TASK_SERVICE_URL'] as const) {
+      if (config[name] === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [name],
+          message: 'Required for Task-triggered actions.',
+        });
+      }
+    }
+  });
 
 /**
  * Interface MigrationConfig

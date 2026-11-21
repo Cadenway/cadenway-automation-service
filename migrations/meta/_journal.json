@@ -15,6 +15,13 @@
       "when": 1795256719402,
       "tag": "0001_automation_rules",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795259477896,
+      "tag": "0002_automation_runs",
+      "breakpoints": true
     }
   ]
 }
