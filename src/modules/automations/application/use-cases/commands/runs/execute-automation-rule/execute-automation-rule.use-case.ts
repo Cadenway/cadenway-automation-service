@@ -1,4 +1,5 @@
 import type { AutomationRun } from '../../../../models/runs/automation-run.model.js';
+import { isAutomationActionAvailable } from '../../../../models/rules/automation-action-availability.model.js';
 import type { AutomationActionExecutor } from '../../../../ports/outbound/actions/runs/automation-action-executor.port.js';
 import type { AutomationRunsUnitOfWork } from '../../../../ports/outbound/transactions/runs/automation-runs-unit-of-work.port.js';
 import type { ExecuteAutomationRuleInput } from './execute-automation-rule.input.js';
@@ -11,10 +12,11 @@ const allowedClockSkewMs = 60 * 1_000;
 /** Reserves and carries out a matching rule once for an authenticated source fact. */
 export class ExecuteAutomationRule {
   // #region Constructor
-  /** Binds the tenant transaction and the downstream action owner. */
+  /** Binds the tenant transaction and the downstream action owner and rollout. */
   public constructor(
     private readonly work: AutomationRunsUnitOfWork,
     private readonly actions: AutomationActionExecutor,
+    private readonly commentAndNotificationEnabled: boolean,
     private readonly now: () => Date = () => new Date(),
   ) {}
   // #endregion
@@ -37,6 +39,9 @@ export class ExecuteAutomationRule {
       if (concurrent !== null) return concurrent;
       if (rule?.matches(input.fact) !== true) return null;
       const state = rule.snapshot();
+      if (!isAutomationActionAvailable(state.action.type, this.commentAndNotificationEnabled)) {
+        return null;
+      }
       return transaction.reserve({
         ruleId: state.ruleId,
         sourceEventId: input.sourceEventId,

@@ -1,6 +1,7 @@
 import type { AutomationTaskTriggerJob } from '../../../../models/runs/automation-task-trigger-job.model.js';
+import { availableAutomationActionTypes } from '../../../../models/rules/automation-action-availability.model.js';
 import type { AutomationTriggerJobs } from '../../../../ports/outbound/jobs/runs/automation-trigger-jobs.port.js';
-import type { AutomationRulesReader } from '../../../../ports/outbound/persistence/rules/automation-rules-reader.port.js';
+import type { AutomationTriggerRulesReader } from '../../../../ports/outbound/persistence/rules/automation-trigger-rules-reader.port.js';
 import type { ExecuteAutomationRule } from '../execute-automation-rule/execute-automation-rule.use-case.js';
 import type { DispatchAutomationTaskTriggerInput } from './dispatch-automation-task-trigger.input.js';
 
@@ -9,11 +10,12 @@ const rulesPerPage = 32;
 /** Dispatches one bounded page of rules or one independently retryable action. */
 export class DispatchAutomationTaskTrigger {
   // #region Constructor
-  /** Binds the paginated rule reader, durable queue and single-rule command. */
+  /** Binds the paginated rule reader, durable queue, single-rule command and supported actions. */
   public constructor(
-    private readonly rules: AutomationRulesReader,
+    private readonly rules: AutomationTriggerRulesReader,
     private readonly jobs: AutomationTriggerJobs,
     private readonly action: Pick<ExecuteAutomationRule, 'execute'>,
+    private readonly commentAndNotificationEnabled: boolean,
   ) {}
   // #endregion
 
@@ -40,19 +42,23 @@ export class DispatchAutomationTaskTrigger {
       return;
     }
 
+    if (fact.type === 'status' && fact.previousStatus === fact.status) return;
     const { after } = job;
-    const page = await this.rules.list(organizationId, {
+    const page = await this.rules.listTriggerCandidates(organizationId, {
       after: after === null ? null : { ...after, createdAt: new Date(after.createdAt) },
       limit: rulesPerPage,
+      occurredAt: new Date(source.occurredAt),
+      trigger:
+        fact.type === 'created' ? { type: 'created' } : { type: 'status', status: fact.status },
+      availableActions: availableAutomationActionTypes(this.commentAndNotificationEnabled),
     });
-    const occurredAt = new Date(source.occurredAt);
     const next: AutomationTaskTriggerJob[] = [];
     for (const rule of page.items) {
-      const state = rule.snapshot();
-      if (state.createdAt > occurredAt) break;
-      if (rule.matches(fact)) next.push({ kind: 'action', source, ruleId: state.ruleId });
+      if (rule.matches(fact)) {
+        next.push({ kind: 'action', source, ruleId: rule.snapshot().ruleId });
+      }
     }
-    if (page.next !== null && page.next.createdAt <= occurredAt) {
+    if (page.next !== null) {
       next.push({
         kind: 'page',
         source,

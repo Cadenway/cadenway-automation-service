@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AutomationRule } from '../../../../../domain/aggregates/rules/automation-rule.aggregate.js';
 import type { AutomationTaskTriggerJob } from '../../../../models/runs/automation-task-trigger-job.model.js';
 import type { AutomationTriggerJobs } from '../../../../ports/outbound/jobs/runs/automation-trigger-jobs.port.js';
-import type { AutomationRulesReader } from '../../../../ports/outbound/persistence/rules/automation-rules-reader.port.js';
+import type { AutomationTriggerRulesReader } from '../../../../ports/outbound/persistence/rules/automation-trigger-rules-reader.port.js';
 import type { ExecuteAutomationRule } from '../execute-automation-rule/execute-automation-rule.use-case.js';
 import { DispatchAutomationTaskTrigger } from './dispatch-automation-task-trigger.use-case.js';
 
@@ -16,13 +16,13 @@ const source = {
   trigger: { type: 'status', previousStatus: 'progress', status: 'review', actorType: 'git' },
 } as const satisfies AutomationTaskTriggerJob['source'];
 
-function rule(last: string, createdAt = '2026-11-21T10:00:00.000Z'): AutomationRule {
+function rule(last: string): AutomationRule {
   return AutomationRule.create(
     {
       organizationId,
       ruleId: `019a700b-1a2b-7c3d-8e4f-5a6b7c8d9e${last}`,
       ruleAuthorUserId: authoredBy,
-      createdAt: new Date(createdAt),
+      createdAt: new Date('2026-11-21T10:00:00.000Z'),
       trigger: { type: 'status', status: 'review' },
       action: { type: 'priority', priority: 'haute' },
     },
@@ -30,11 +30,16 @@ function rule(last: string, createdAt = '2026-11-21T10:00:00.000Z'): AutomationR
   );
 }
 
-function setup() {
-  const list = vi.fn<AutomationRulesReader['list']>();
+function setup(commentAndNotificationEnabled = false) {
+  const list = vi.fn<AutomationTriggerRulesReader['listTriggerCandidates']>();
   const enqueue = vi.fn<AutomationTriggerJobs['enqueue']>();
   const action = vi.fn<ExecuteAutomationRule['execute']>().mockResolvedValue({ status: 'ignored' });
-  const dispatch = new DispatchAutomationTaskTrigger({ list }, { enqueue }, { execute: action });
+  const dispatch = new DispatchAutomationTaskTrigger(
+    { listTriggerCandidates: list },
+    { enqueue },
+    { execute: action },
+    commentAndNotificationEnabled,
+  );
   return { list, enqueue, action, dispatch, signal: new AbortController().signal };
 }
 
@@ -42,12 +47,12 @@ describe('DispatchAutomationTaskTrigger', () => {
   it('queues eligible actions and the next page atomically without a global rule cap', async () => {
     const { dispatch, list, enqueue, action, signal } = setup();
     const match = rule('10');
-    const disabled = rule('11').setEnabled(false);
+    const lastMatch = rule('11');
     const secondPageMatch = rule('12');
-    const last = disabled.snapshot();
+    const last = lastMatch.snapshot();
     list
       .mockResolvedValueOnce({
-        items: [match, disabled],
+        items: [match, lastMatch],
         next: { createdAt: last.createdAt, ruleId: last.ruleId },
       })
       .mockResolvedValueOnce({ items: [secondPageMatch], next: null });
@@ -58,17 +63,28 @@ describe('DispatchAutomationTaskTrigger', () => {
     } as const;
 
     await dispatch.execute({ organizationId, signal, job: { kind: 'page', source, after: null } });
-    expect(list).toHaveBeenNthCalledWith(1, organizationId, { after: null, limit: 32 });
+    const query = {
+      after: null,
+      limit: 32,
+      occurredAt: new Date(source.occurredAt),
+      trigger: { type: 'status', status: 'review' },
+      availableActions: ['assign', 'priority'],
+    };
+    expect(list).toHaveBeenNthCalledWith(1, organizationId, query);
     expect(enqueue).toHaveBeenNthCalledWith(
       1,
       organizationId,
-      [{ kind: 'action', source, ruleId: match.snapshot().ruleId }, next],
+      [
+        { kind: 'action', source, ruleId: match.snapshot().ruleId },
+        { kind: 'action', source, ruleId: last.ruleId },
+        next,
+      ],
       signal,
     );
     await dispatch.execute({ organizationId, signal, job: next });
     expect(list).toHaveBeenNthCalledWith(2, organizationId, {
+      ...query,
       after: { createdAt: last.createdAt, ruleId: last.ruleId },
-      limit: 32,
     });
     expect(enqueue).toHaveBeenNthCalledWith(
       2,
@@ -79,12 +95,24 @@ describe('DispatchAutomationTaskTrigger', () => {
     expect(action).not.toHaveBeenCalled();
   });
 
-  it('stops at rules created after the source fact', async () => {
-    const { dispatch, list, enqueue, signal } = setup();
-    const late = rule('10', '2026-11-21T11:00:00.001Z');
-    const { createdAt, ruleId } = late.snapshot();
-    list.mockResolvedValue({ items: [late], next: { createdAt, ruleId } });
-    await dispatch.execute({ organizationId, signal, job: { kind: 'page', source, after: null } });
+  it('queries all supported actions after rollout and enqueues nothing for an empty page', async () => {
+    const { dispatch, list, enqueue, signal } = setup(true);
+    const created = { ...source, trigger: { type: 'created', actorType: 'user' } } as const;
+    list.mockResolvedValue({ items: [], next: null });
+
+    await dispatch.execute({
+      organizationId,
+      signal,
+      job: { kind: 'page', source: created, after: null },
+    });
+
+    expect(list).toHaveBeenCalledExactlyOnceWith(organizationId, {
+      after: null,
+      limit: 32,
+      occurredAt: new Date(source.occurredAt),
+      trigger: { type: 'created' },
+      availableActions: ['assign', 'priority', 'comment', 'notify'],
+    });
     expect(enqueue).not.toHaveBeenCalled();
   });
 
@@ -106,13 +134,22 @@ describe('DispatchAutomationTaskTrigger', () => {
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  it('does no work for automation actors or aborted deliveries', async () => {
+  it('does no work for automation actors, unchanged statuses, or aborted deliveries', async () => {
     const { dispatch, list, enqueue, action, signal } = setup();
     const loop = { ...source, trigger: { ...source.trigger, actorType: 'automation' as const } };
     await dispatch.execute({
       organizationId,
       signal,
       job: { kind: 'page', source: loop, after: null },
+    });
+    const unchanged = {
+      ...source,
+      trigger: { ...source.trigger, previousStatus: source.trigger.status },
+    };
+    await dispatch.execute({
+      organizationId,
+      signal,
+      job: { kind: 'page', source: unchanged, after: null },
     });
     await expect(
       dispatch.execute({

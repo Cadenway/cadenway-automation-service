@@ -67,23 +67,32 @@ const vocabulary = { statuses: STATUS_KEYS, priorities: PRIORITY_KEYS };
     },
     {
       provide: CreateAutomationRule,
-      inject: [DrizzleAutomationRulesUnitOfWork],
-      useFactory: (work: DrizzleAutomationRulesUnitOfWork) =>
-        new CreateAutomationRule(work, vocabulary, {
-          isActiveRecipient: (organizationId, userId) => {
-            const caller = getOrganizationContext();
-            return Promise.resolve(
-              caller?.organizationId === organizationId &&
-                caller.actor.type === 'user' &&
-                caller.scopes.includes(`automation:recipient:${userId.toLowerCase()}`),
-            );
+      inject: [DrizzleAutomationRulesUnitOfWork, CONFIG],
+      useFactory: (work: DrizzleAutomationRulesUnitOfWork, config: AppConfig) =>
+        new CreateAutomationRule(
+          work,
+          vocabulary,
+          {
+            isActiveRecipient: (organizationId, userId) => {
+              const caller = getOrganizationContext();
+              return Promise.resolve(
+                caller?.organizationId === organizationId &&
+                  caller.actor.type === 'user' &&
+                  caller.scopes.includes(`automation:recipient:${userId.toLowerCase()}`),
+              );
+            },
           },
-        }),
+          config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED,
+        ),
     },
     {
       provide: SetAutomationRuleEnabled,
-      inject: [DrizzleAutomationRulesUnitOfWork],
-      useFactory: (work: DrizzleAutomationRulesUnitOfWork) => new SetAutomationRuleEnabled(work),
+      inject: [DrizzleAutomationRulesUnitOfWork, CONFIG],
+      useFactory: (work: DrizzleAutomationRulesUnitOfWork, config: AppConfig) =>
+        new SetAutomationRuleEnabled(
+          work,
+          config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED,
+        ),
     },
     {
       provide: DeleteAutomationRule,
@@ -140,7 +149,9 @@ const vocabulary = { statuses: STATUS_KEYS, priorities: PRIORITY_KEYS };
           issuer: config.INTERNAL_TOKEN_ISSUER,
           privateJwk,
         });
-        const notificationUrl = config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED
+        const commentAndNotificationEnabled =
+          config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED;
+        const notificationUrl = commentAndNotificationEnabled
           ? config.NOTIFICATION_SERVICE_URL
           : undefined;
         const actions = new AutomationActionHttpAdapter(
@@ -166,7 +177,8 @@ const vocabulary = { statuses: STATUS_KEYS, priorities: PRIORITY_KEYS };
         const dispatch = new DispatchAutomationTaskTrigger(
           new DrizzleAutomationRulesReader(runner, vocabulary),
           jobs,
-          new ExecuteAutomationRule(work, actions),
+          new ExecuteAutomationRule(work, actions, commentAndNotificationEnabled),
+          commentAndNotificationEnabled,
         );
         return new AutomationTriggerJobHandler(
           workers,

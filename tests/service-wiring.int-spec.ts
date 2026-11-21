@@ -27,6 +27,7 @@ import { taskCreatedV1Schema } from '@cadenway/contracts/events/task-service';
 
 import { AppModule } from '../src/app.module.js';
 import { appConfigSchema } from '../src/config/app-config.js';
+import { AUTOMATION_TASK_TRIGGER_QUEUE } from '../src/config/job-queues.js';
 
 // The service as main.ts assembles it, on a disposable PostgreSQL and NATS. `@cadenway/nest-testing`
 // does not export its container fixtures yet and a service never depends on `testcontainers` itself,
@@ -311,6 +312,7 @@ describe('automation-service wiring', () => {
     vi.stubEnv('TASK_SERVICE_URL', `http://127.0.0.1:${String(address.port)}`);
     vi.stubEnv('INTERNAL_TOKEN_PRIVATE_JWK', JSON.stringify(automation.privateJwk));
     vi.stubEnv('AUTOMATION_TASK_TRIGGERS_ENABLED', 'true');
+    vi.stubEnv('AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED', 'false');
     vi.stubEnv('AUTOMATION_CURSOR_SIGNING_KEY', randomBytes(32).toString('hex'));
     vi.stubEnv(
       'INTERNAL_TOKEN_TRUSTED_ISSUERS',
@@ -464,6 +466,81 @@ describe('automation-service wiring', () => {
     const replay = await create(approved).expect(201);
     expect(replay.headers['idempotent-replayed']).toBe('true');
     expect(replay.body).toEqual(first.body);
+  });
+
+  it('rejects new and reactivated rules for unavailable actions without changing stored rules', async () => {
+    const organizationId = '01938f6e-0000-7000-8000-000000000078';
+    const recipientId = '01938f6e-0000-7000-8000-000000000079';
+    const actions = [
+      { type: 'comment', body: 'Ready for review' },
+      { type: 'notify', userId: recipientId },
+    ];
+    const trigger = { type: 'created' };
+    const owner = {
+      actor: { type: 'user', id: camilleMartinId },
+      organizationId,
+      role: 'owner',
+    } as const;
+    const [approved, missing] = await Promise.all([
+      signer.sign('automation-service', {
+        ...owner,
+        scopes: [`automation:recipient:${recipientId}`],
+      }),
+      signer.sign('automation-service', owner),
+    ]);
+    const create = (authorization: string, action: (typeof actions)[number]) =>
+      request(service().getHttpServer())
+        .post('/internal/v1/automations')
+        .set('Authorization', `Bearer ${authorization}`)
+        .set('Idempotency-Key', randomUUID())
+        .send({ trigger, action });
+    const denied = await create(missing, { type: 'notify', userId: recipientId }).expect(422);
+    expect(denied.body).toMatchObject({ code: 'automation.recipient-ineligible' });
+    for (const action of actions) {
+      const unavailable = await create(approved, action).expect(503);
+      expect(unavailable.body).toMatchObject({ code: 'automation.unavailable' });
+      expect(unavailable.headers.location).toBeUndefined();
+    }
+
+    const system = service().get(SystemTransactionRunner);
+    const counts = await system.run(({ client }) =>
+      client.query(
+        `select
+           (select count(*)::int from automation_rules where organization_id = $1) as rules,
+           (select count(*)::int from idempotency_keys where organization_id = $1) as receipts`,
+        [organizationId],
+      ),
+    );
+    expect(counts.rows).toEqual([{ rules: 0, receipts: 0 }]);
+
+    for (const action of actions) {
+      const result = await system.run(({ client }) =>
+        client.query(
+          `insert into automation_rules (organization_id, rule_author_user_id, trigger, action)
+           values ($1, $2, $3, $4) returning id`,
+          [organizationId, camilleMartinId, trigger, action],
+        ),
+      );
+      const row = result.rows[0] as { readonly id: string } | undefined;
+      const id = row?.id;
+      if (id === undefined) throw new Error('Expected the stored rule ID.');
+      const update = (etag: string, body: { enabled: boolean; action?: typeof action }) =>
+        request(service().getHttpServer())
+          .patch(`/internal/v1/automations/${id}`)
+          .set('Authorization', `Bearer ${approved}`)
+          .set('If-Match', etag)
+          .send(body);
+      const disabled = await update('"1"', { enabled: false }).expect(200);
+      expect(disabled.body).toMatchObject({ enabled: false, version: 2, action });
+      const stale = await update('"1"', { enabled: true }).expect(412);
+      expect(stale.body).toMatchObject({ code: 'request.version-mismatch' });
+      const unavailable = await update('"2"', { enabled: true }).expect(503);
+      expect(unavailable.body).toMatchObject({ code: 'automation.unavailable' });
+      const invalid = await update('"2"', { enabled: true, action }).expect(400);
+      expect(invalid.body).toMatchObject({ code: 'request.invalid' });
+      const unchanged = await update('"2"', { enabled: false }).expect(200);
+      expect(unchanged.body).toMatchObject({ enabled: false, version: 2, action });
+    }
   });
 
   it('forces row-level security on the tables that carry an organization', async () => {
@@ -666,7 +743,7 @@ describe('automation-service wiring', () => {
     expect(journal.rows).toEqual([{ applied: 3 }]);
   });
 
-  it('runs a created-task rule once through JetStream and records its execution', async () => {
+  it('records one execution without paging through nonmatching rules after a JetStream event', async () => {
     const organizationId = '01938f6e-0000-7000-8000-000000000075';
     const ownerToken = await signer.sign('automation-service', {
       actor: { type: 'user', id: camilleMartinId },
@@ -680,6 +757,32 @@ describe('automation-service wiring', () => {
       .send({ trigger: { type: 'created' }, action: { type: 'priority', priority: 'haute' } })
       .expect(201);
     const { ruleId } = created.body as { readonly ruleId: string };
+    const system = service().get(SystemTransactionRunner);
+    await system.run(({ client }) =>
+      client.query(
+        `insert into automation_rules (organization_id, rule_author_user_id, trigger, action, enabled, created_at)
+         select $1, $2,
+                case when n % 2 = 0 then '{"type":"status","status":"progress"}'::jsonb
+                     else '{"type":"created"}'::jsonb end,
+                '{"type":"priority","priority":"haute"}',
+                n % 2 = 0,
+                now() - interval '1 hour'
+           from generate_series(1, 40) as series(n)`,
+        [organizationId, camilleMartinId],
+      ),
+    );
+    await system.run(({ client }) =>
+      client.query(
+        `insert into automation_rules (organization_id, rule_author_user_id, trigger, action)
+         values ($1, $2, '{"type":"created"}', $3), ($1, $2, '{"type":"created"}', $4)`,
+        [
+          organizationId,
+          camilleMartinId,
+          { type: 'comment', body: 'Ready for review' },
+          { type: 'notify', userId: camilleMartinId },
+        ],
+      ),
+    );
     const event = taskCreatedV1Schema.parse({
       id: randomUUID(),
       occurredAt: new Date().toISOString(),
@@ -712,7 +815,6 @@ describe('automation-service wiring', () => {
         JSON.stringify(payload),
       );
     publish(event);
-    const system = service().get(SystemTransactionRunner);
     await vi.waitFor(
       async () => {
         const runs = await system.run(({ client }) =>
@@ -774,7 +876,7 @@ describe('automation-service wiring', () => {
       nextCursor: null,
     });
     expect((history.body as { readonly items: readonly unknown[] }).items).toHaveLength(1);
-    const [runs, outbox] = await Promise.all([
+    const [runs, outbox, jobs] = await Promise.all([
       system.run(({ client }) =>
         client.query('select id from automation_runs where organization_id = $1', [organizationId]),
       ),
@@ -785,9 +887,22 @@ describe('automation-service wiring', () => {
           [organizationId],
         ),
       ),
+      system.run(({ client }) =>
+        client.query(
+          `select name, data #>> '{payload,kind}' as kind, data #>> '{payload,ruleId}' as rule_id
+             from pgboss.job
+            where data #>> '{payload,source,id}' = $1 and data ->> 'organizationId' = $2
+            order by kind`,
+          [event.id, organizationId],
+        ),
+      ),
     ]);
     expect(runs.rows).toHaveLength(1);
     expect(outbox.rows).toHaveLength(1);
+    expect(jobs.rows).toEqual([
+      { name: AUTOMATION_TASK_TRIGGER_QUEUE.name, kind: 'action', rule_id: ruleId },
+      { name: AUTOMATION_TASK_TRIGGER_QUEUE.name, kind: 'page', rule_id: null },
+    ]);
     expect(taskCalls).toHaveLength(1);
   });
 

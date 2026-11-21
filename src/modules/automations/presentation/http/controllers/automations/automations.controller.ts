@@ -110,8 +110,18 @@ function version(header: string | undefined): number | null {
 }
 
 function refuse(
-  result: { status: 'not-found' } | { status: 'version-mismatch'; version: number },
+  result:
+    | { status: 'action-unavailable' }
+    | { status: 'not-found' }
+    | { status: 'version-mismatch'; version: number },
 ): never {
+  if (result.status === 'action-unavailable') {
+    throw new ProblemException({
+      status: 503,
+      code: 'automation.unavailable',
+      detail: 'The automation action is unavailable.',
+    });
+  }
   if (result.status === 'not-found') {
     throw new ProblemException({
       status: 404,
@@ -194,6 +204,7 @@ export class AutomationsController {
         detail: 'The recipient is not an active organization member.',
       });
     }
+    if (result.status === 'action-unavailable') return refuse(result);
     const rule = mapRule(result.rule);
     response.setHeader('Location', `/internal/v1/automations/${rule.ruleId}`);
     response.setHeader('ETag', formatEtag(rule.version));

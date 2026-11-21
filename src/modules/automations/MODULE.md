@@ -58,6 +58,12 @@ notification-authorization endpoints and Notification's in-app command are avail
 issuer trust configured. These actions only enter history if their owners confirm an applied
 receipt. A suppressed in-app notification settles as a no-op.
 
+Creating or enabling a comment or notification rule returns `503 automation.unavailable` while
+these actions are disabled. The creation endpoint always creates an enabled rule and the patch
+only changes enablement. Existing rules can be listed, disabled or deleted during the outage.
+Workers skip unavailable actions when enqueuing or reserving new executions, including existing
+rules left enabled. Already reserved actions keep their retry and reconciliation semantics.
+
 Invalid events are dead-lettered in JetStream. A failing admission has five attempts with
 delays of 1 second, 5 seconds, 30 seconds and 2 minutes. Queued work gets five attempts with
 delays starting at 15 seconds and capped at 2 minutes. The worker checks the one-hour window
@@ -74,8 +80,10 @@ without an automatic replay.
 - Events from an `automation` actor are ignored to prevent action-triggered loops. Disabled or
   deleted rules are ineligible for new trigger decisions. An unchanged enablement keeps the
   current rule version.
-- A continuation advances through the tenant's rules by creation time and ID in pages of up to 32. Only rules already created when the fact occurred are eligible. Independent status
-  transitions are evaluated by source event ID, regardless of arrival order.
+- A continuation advances through matching enabled rules with available actions by creation time
+  and ID in pages of up to 32. PostgreSQL filters candidates before pagination. Only rules already
+  created when the fact occurred are eligible. Independent status transitions are evaluated by
+  source event ID, regardless of arrival order.
 - The tenant, rule and triggering event identify one execution across retries. Only applied
   actions enter history and emit an execution fact. A no-op, skipped or failed action does not.
 - A rule's delegation is recorded from the authenticated creator. The receiving service checks
