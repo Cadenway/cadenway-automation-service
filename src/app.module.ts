@@ -11,6 +11,7 @@ import { Module } from '@nestjs/common';
 
 import { appConfigSchema } from './config/app-config.js';
 import type { AppConfig } from './config/app-config.js';
+import { AutomationsModule } from './modules/automations/automations.module.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
 
 /**
@@ -32,8 +33,7 @@ import { PlatformModule } from './modules/platform/platform.module.js';
  *   `_INBOX.automation` the broker requires. The creation waits for the first connection, then
  *   checks that the `EVENTS` stream exists: cadenway-ops creates the streams
  *   (`manageStreams: false`), and only notification-service runs the dead-letter worker. The
- *   service publishes and consumes nothing yet: `@cadenway/contracts` defines neither its
- *   `automation.executed` event nor the task events it listens to.
+ *   Automations module will bind its event contracts after their publication and installation.
  * - `OutboxModule`: the outbox writer, the PostgreSQL deduplicator and the relay, which polls
  *   `outbox_events` every second in a system transaction and publishes the pending rows. It runs in
  *   every replica; `for update skip locked` keeps two of them from publishing the same row.
@@ -82,6 +82,7 @@ import { PlatformModule } from './modules/platform/platform.module.js';
       }),
     }),
     PlatformModule,
+    AutomationsModule,
   ],
 })
 export class AppModule {}

@@ -303,7 +303,7 @@ describe('automation-service wiring', () => {
     }
   });
 
-  it('applies its migration as the migrator role, which owns the platform tables', async () => {
+  it('applies migrations as the migrator role, which owns the platform and rule tables', async () => {
     const tables = await migrator.query<{ tablename: string; tableowner: string }>(
       `select tablename, tableowner from pg_tables where schemaname = 'public' order by tablename`,
     );
@@ -312,9 +312,12 @@ describe('automation-service wiring', () => {
     );
 
     expect(tables.rows).toEqual(
-      platformTables.map((tablename) => ({ tablename, tableowner: 'automation_migrator' })),
+      ['automation_rules', ...platformTables].map((tablename) => ({
+        tablename,
+        tableowner: 'automation_migrator',
+      })),
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: 2 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -323,7 +326,7 @@ describe('automation-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: 2 }]);
   });
 
   it('forces row-level security on the tables that carry an organization', async () => {
@@ -342,12 +345,14 @@ describe('automation-service wiring', () => {
     );
 
     expect(tables.rows).toEqual([
+      { relname: 'automation_rules', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'event_versions', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'idempotency_keys', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'outbox_events', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'processed_events', relrowsecurity: false, relforcerowsecurity: false },
     ]);
     expect(policies.rows).toEqual([
+      { tablename: 'automation_rules', policyname: 'automation_rules_tenant_isolation' },
       { tablename: 'event_versions', policyname: 'event_versions_organization_isolation' },
       { tablename: 'idempotency_keys', policyname: 'idempotency_keys_organization_isolation' },
       { tablename: 'outbox_events', policyname: 'outbox_events_organization_isolation' },
@@ -519,7 +524,7 @@ describe('automation-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: 2 }]);
   });
 
   it('publishes a pending event through the outbox relay', async () => {
