@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/Cadenway/cadenway-automation-service/compare/v0.3.0...v0.4.0) (2026-11-21)
+
+
+### Features
+
+* **automation:** dispatch comment and notification rule actions ([#29](https://github.com/Cadenway/cadenway-automation-service/issues/29)) ([241d6ec](https://github.com/Cadenway/cadenway-automation-service/commit/241d6ec0d2fb08f9a9234093e78f71856663490c))
+* **automation:** manage and execute task rules durably ([#27](https://github.com/Cadenway/cadenway-automation-service/issues/27)) ([85e11c4](https://github.com/Cadenway/cadenway-automation-service/commit/85e11c46f58c1bdfa583fa97baba729f33a9edb7))
+
 ## [0.3.0](https://github.com/Cadenway/cadenway-automation-service/compare/v0.2.0...v0.3.0) (2026-11-16)
 
 
