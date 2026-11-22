@@ -1,15 +1,19 @@
 import type { DatabaseSchema, TenantTransactionRunner } from '@cadenway/nest-common/database';
-import { and, asc, eq, gt, or } from 'drizzle-orm';
+import { and, asc, eq, inArray, lte, sql } from 'drizzle-orm';
+import type { SQL } from 'drizzle-orm';
 
 import type { AutomationRulePage } from '../../../../../application/models/rules/automation-rule-page.model.js';
 import type { AutomationRulePosition } from '../../../../../application/models/rules/automation-rule-position.model.js';
 import type { AutomationRulesReader } from '../../../../../application/ports/outbound/persistence/rules/automation-rules-reader.port.js';
+import type { AutomationTriggerRulesReader } from '../../../../../application/ports/outbound/persistence/rules/automation-trigger-rules-reader.port.js';
 import type { AutomationTaskVocabulary } from '../../../../../domain/value-objects/rules/automation-task-vocabulary.value-object.js';
 import { mapAutomationRule } from '../../mappers/rules/automation-rule.mapper.js';
 import { automationRules } from '../../schemas/rules/automation-rules.schema.js';
 
 /** Lists one verified tenant's rules in stable creation and UUID order. */
-export class DrizzleAutomationRulesReader implements AutomationRulesReader {
+export class DrizzleAutomationRulesReader
+  implements AutomationRulesReader, AutomationTriggerRulesReader
+{
   // #region Constructor
   /** Uses the shared tenant transaction and the published Task vocabulary. */
   public constructor(
@@ -19,10 +23,40 @@ export class DrizzleAutomationRulesReader implements AutomationRulesReader {
   // #endregion
 
   // #region Methods
-  /** Reads at most one hundred rows plus a lookahead to construct a continuation position. */
+  /** Lists all rules in the organization for management. */
   public list(
     organizationId: string,
     query: { readonly after: AutomationRulePosition | null; readonly limit: number },
+  ): Promise<AutomationRulePage> {
+    return this.readPage(organizationId, query);
+  }
+
+  /** Filters candidates before applying the page limit and continuation. */
+  public listTriggerCandidates(
+    organizationId: string,
+    query: Parameters<AutomationTriggerRulesReader['listTriggerCandidates']>[1],
+  ): Promise<AutomationRulePage> {
+    const { trigger, occurredAt, availableActions } = query;
+    return this.readPage(
+      organizationId,
+      query,
+      and(
+        sql`${automationRules.enabled}`,
+        lte(automationRules.createdAt, occurredAt),
+        eq(sql<string>`(${automationRules.trigger} ->> 'type')`, trigger.type),
+        trigger.type === 'status'
+          ? eq(sql<string>`(${automationRules.trigger} ->> 'status')`, trigger.status)
+          : undefined,
+        inArray(sql<string>`(${automationRules.action} ->> 'type')`, availableActions),
+      ),
+    );
+  }
+
+  /** Reads one stable keyset page with a one-row lookahead. */
+  private readPage(
+    organizationId: string,
+    query: { readonly after: AutomationRulePosition | null; readonly limit: number },
+    filters?: SQL,
   ): Promise<AutomationRulePage> {
     if (!Number.isInteger(query.limit) || query.limit < 1 || query.limit > 100) {
       throw new Error('The automation rule page limit must be between 1 and 100.');
@@ -41,13 +75,9 @@ export class DrizzleAutomationRulesReader implements AutomationRulesReader {
               eq(automationRules.organizationId, organizationId),
               position === null
                 ? undefined
-                : or(
-                    gt(automationRules.createdAt, position.createdAt),
-                    and(
-                      eq(automationRules.createdAt, position.createdAt),
-                      gt(automationRules.id, position.ruleId),
-                    ),
-                  ),
+                : sql`(${automationRules.createdAt}, ${automationRules.id})
+                    > (${position.createdAt.toISOString()}::timestamptz, ${position.ruleId}::uuid)`,
+              filters,
             ),
           )
           .orderBy(asc(automationRules.createdAt), asc(automationRules.id))

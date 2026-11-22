@@ -71,7 +71,7 @@ function setup(): {
 describe('ExecuteAutomationRule', () => {
   it('reserves the current rule and author before calling its owner and records one fact', async () => {
     const { transaction, work, actions } = setup();
-    const command = new ExecuteAutomationRule(work, actions, () => time);
+    const command = new ExecuteAutomationRule(work, actions, false, () => time);
 
     await expect(command.execute(input)).resolves.toEqual({ status: 'applied', runId });
     expect(transaction.reserve).toHaveBeenCalledWith({
@@ -97,7 +97,7 @@ describe('ExecuteAutomationRule', () => {
     const { transaction, work, actions } = setup();
     vi.mocked(transaction.lockRule).mockResolvedValue(currentRule);
     await expect(
-      new ExecuteAutomationRule(work, actions, () => time).execute({ ...input, fact }),
+      new ExecuteAutomationRule(work, actions, false, () => time).execute({ ...input, fact }),
     ).resolves.toEqual({
       status: 'ignored',
     });
@@ -105,11 +105,35 @@ describe('ExecuteAutomationRule', () => {
     expect(actions.execute).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { type: 'comment', body: 'Ready for review' },
+    { type: 'notify', userId: authorId },
+  ] as const)(
+    'ignores a queued $type action when it cannot be reserved',
+    async (unavailableAction) => {
+      const { transaction, work, actions } = setup();
+      const currentRule = AutomationRule.restore(
+        { ...rule.snapshot(), action: unavailableAction },
+        {
+          statuses: ['todo'],
+          priorities: ['high'],
+        },
+      );
+      vi.mocked(transaction.lockRule).mockResolvedValue(currentRule);
+
+      await expect(
+        new ExecuteAutomationRule(work, actions, false, () => time).execute(input),
+      ).resolves.toEqual({ status: 'ignored' });
+      expect(transaction.reserve).not.toHaveBeenCalled();
+      expect(actions.execute).not.toHaveBeenCalled();
+    },
+  );
+
   it('resumes the same decision after a lost downstream response even when the rule is gone', async () => {
     const { transaction, work, actions } = setup();
     vi.mocked(transaction.findBySource).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
     vi.mocked(actions.execute).mockRejectedValueOnce(new Error('response lost'));
-    const command = new ExecuteAutomationRule(work, actions, () => time);
+    const command = new ExecuteAutomationRule(work, actions, false, () => time);
     await expect(command.execute(input)).rejects.toThrow('response lost');
     expect(transaction.settle).not.toHaveBeenCalled();
 
@@ -131,7 +155,7 @@ describe('ExecuteAutomationRule', () => {
       const reserved: AutomationRun = { ...pending, action: reservedAction };
       vi.mocked(transaction.findBySource).mockResolvedValue(reserved);
       vi.mocked(actions.execute).mockRejectedValueOnce(new Error('response lost'));
-      const command = new ExecuteAutomationRule(work, actions, () => time);
+      const command = new ExecuteAutomationRule(work, actions, false, () => time);
 
       await expect(command.execute(input)).rejects.toThrow('response lost');
       expect(transaction.settle).not.toHaveBeenCalled();
@@ -150,7 +174,7 @@ describe('ExecuteAutomationRule', () => {
     vi.mocked(transaction.findBySource).mockResolvedValueOnce(null).mockResolvedValueOnce(pending);
     vi.mocked(transaction.lockRule).mockResolvedValue(null);
     await expect(
-      new ExecuteAutomationRule(work, actions, () => time).execute(input),
+      new ExecuteAutomationRule(work, actions, false, () => time).execute(input),
     ).resolves.toEqual({
       status: 'applied',
       runId,
@@ -162,7 +186,7 @@ describe('ExecuteAutomationRule', () => {
     const { transaction, work, actions } = setup();
     vi.mocked(transaction.findBySource).mockResolvedValue({ ...pending, status: 'applied' });
     await expect(
-      new ExecuteAutomationRule(work, actions, () => time).execute(input),
+      new ExecuteAutomationRule(work, actions, false, () => time).execute(input),
     ).resolves.toEqual({
       status: 'applied',
       runId,
@@ -177,6 +201,7 @@ describe('ExecuteAutomationRule', () => {
     const command = new ExecuteAutomationRule(
       work,
       actions,
+      false,
       () => new Date(time.getTime() + 23 * 60 * 60 * 1_000),
     );
     await expect(command.execute(input)).rejects.toThrow('outside its downstream retry window');
@@ -191,6 +216,7 @@ describe('ExecuteAutomationRule', () => {
     const command = new ExecuteAutomationRule(
       work,
       actions,
+      false,
       () => new Date(time.getTime() + 23 * 60 * 60 * 1_000 - 1),
     );
     await expect(command.execute(input)).resolves.toEqual({ status: 'applied', runId });
@@ -200,7 +226,10 @@ describe('ExecuteAutomationRule', () => {
   it('forwards cancellation to the downstream action', async () => {
     const { work, actions } = setup();
     const controller = new AbortController();
-    await new ExecuteAutomationRule(work, actions, () => time).execute(input, controller.signal);
+    await new ExecuteAutomationRule(work, actions, false, () => time).execute(
+      input,
+      controller.signal,
+    );
     expect(actions.execute).toHaveBeenCalledWith(pending, controller.signal);
   });
 
@@ -212,7 +241,7 @@ describe('ExecuteAutomationRule', () => {
       return Promise.resolve(pending);
     });
     await expect(
-      new ExecuteAutomationRule(work, actions, () => time).execute(input, controller.signal),
+      new ExecuteAutomationRule(work, actions, false, () => time).execute(input, controller.signal),
     ).rejects.toMatchObject({ name: 'AbortError' });
     expect(actions.execute).not.toHaveBeenCalled();
     expect(transaction.settle).not.toHaveBeenCalled();
@@ -225,7 +254,7 @@ describe('ExecuteAutomationRule', () => {
       createdAt: new Date(time.getTime() + 60_001),
     });
     await expect(
-      new ExecuteAutomationRule(work, actions, () => time).execute(input),
+      new ExecuteAutomationRule(work, actions, false, () => time).execute(input),
     ).rejects.toThrow('outside its downstream retry window');
     expect(actions.execute).not.toHaveBeenCalled();
   });
@@ -233,7 +262,7 @@ describe('ExecuteAutomationRule', () => {
   it('does not emit for a no-op or for a transition settled by another worker', async () => {
     const { transaction, work, actions } = setup();
     vi.mocked(actions.execute).mockResolvedValueOnce('no_op').mockResolvedValueOnce('applied');
-    const command = new ExecuteAutomationRule(work, actions, () => time);
+    const command = new ExecuteAutomationRule(work, actions, false, () => time);
     await expect(command.execute(input)).resolves.toEqual({ status: 'no_op', runId });
     vi.mocked(transaction.settle).mockResolvedValue(false);
     await expect(command.execute(input)).resolves.toEqual({ status: 'applied', runId });
@@ -244,14 +273,14 @@ describe('ExecuteAutomationRule', () => {
     const { transaction, work, actions } = setup();
     vi.mocked(transaction.appendExecuted).mockRejectedValue(new Error('outbox unavailable'));
     await expect(
-      new ExecuteAutomationRule(work, actions, () => time).execute(input),
+      new ExecuteAutomationRule(work, actions, false, () => time).execute(input),
     ).rejects.toThrow('outbox unavailable');
     expect(transaction.settle).toHaveBeenCalledWith(runId, 'applied');
   });
 
   it('rejects mismatched tenants and source identities', async () => {
     const { transaction, work, actions } = setup();
-    const command = new ExecuteAutomationRule(work, actions, () => time);
+    const command = new ExecuteAutomationRule(work, actions, false, () => time);
     await expect(
       command.execute({ ...input, fact: { ...input.fact, organizationId: authorId } }),
     ).rejects.toThrow('organization');

@@ -20,6 +20,10 @@ const definition = {
   trigger: { type: 'created' } as const,
   action: { type: 'assign', userId } as const,
 };
+const gatedActions = [
+  { type: 'comment', body: 'Ready for review' },
+  { type: 'notify', userId },
+] as const;
 
 function setup(): {
   readonly transaction: AutomationRulesTransaction;
@@ -27,6 +31,7 @@ function setup(): {
   readonly recipients: AutomationRecipientAuthority;
 } {
   const transaction: AutomationRulesTransaction = {
+    hasEnabledRuleCapacity: vi.fn().mockResolvedValue(true),
     allocateIdentity: vi.fn().mockResolvedValue({ ruleId, createdAt: definition.createdAt }),
     find: vi.fn().mockResolvedValue(AutomationRule.create(definition, vocabulary)),
     insert: vi.fn().mockResolvedValue(undefined),
@@ -47,9 +52,24 @@ function setup(): {
 }
 
 describe('automation rule writes', () => {
+  it('leaves the rule store unchanged when an organization has no enabled capacity', async () => {
+    const { work, transaction, recipients } = setup();
+    vi.mocked(transaction.hasEnabledRuleCapacity).mockResolvedValue(false);
+    const create = new CreateAutomationRule(work, vocabulary, recipients, false);
+    await expect(
+      create.execute({
+        organizationId,
+        ruleAuthorUserId: definition.ruleAuthorUserId,
+        trigger: definition.trigger,
+        action: definition.action,
+      }),
+    ).resolves.toEqual({ status: 'enabled-capacity-exhausted' });
+    expect(transaction.allocateIdentity).not.toHaveBeenCalled();
+    expect(transaction.insert).not.toHaveBeenCalled();
+  });
   it('creates a tenant rule only after recipient eligibility is confirmed', async () => {
     const { work, transaction, recipients } = setup();
-    const command = new CreateAutomationRule(work, vocabulary, recipients);
+    const command = new CreateAutomationRule(work, vocabulary, recipients, false);
 
     const result = await command.execute({
       organizationId,
@@ -66,16 +86,39 @@ describe('automation rule writes', () => {
     expect(transaction.insert).toHaveBeenCalledOnce();
   });
 
+  it.each(gatedActions)(
+    'only creates a $type rule when its action is available',
+    async (action) => {
+      const { work, transaction, recipients } = setup();
+      const input = {
+        organizationId,
+        ruleAuthorUserId: userId,
+        trigger: definition.trigger,
+        action,
+      };
+      await expect(
+        new CreateAutomationRule(work, vocabulary, recipients, false).execute(input),
+      ).resolves.toEqual({ status: 'action-unavailable' });
+      expect(transaction.allocateIdentity).not.toHaveBeenCalled();
+      expect(transaction.insert).not.toHaveBeenCalled();
+
+      await expect(
+        new CreateAutomationRule(work, vocabulary, recipients, true).execute(input),
+      ).resolves.toMatchObject({ status: 'created', rule: { enabled: true, action } });
+      expect(transaction.insert).toHaveBeenCalledOnce();
+    },
+  );
+
   it('refuses an inactive recipient without inserting a rule', async () => {
     const { work, transaction, recipients } = setup();
     vi.mocked(recipients.isActiveRecipient).mockResolvedValue(false);
 
     await expect(
-      new CreateAutomationRule(work, vocabulary, recipients).execute({
+      new CreateAutomationRule(work, vocabulary, recipients, false).execute({
         organizationId,
         ruleAuthorUserId: userId,
         trigger: definition.trigger,
-        action: definition.action,
+        action: { type: 'notify', userId },
       }),
     ).resolves.toEqual({ status: 'recipient-not-active' });
     expect(transaction.insert).not.toHaveBeenCalled();
@@ -86,7 +129,7 @@ describe('automation rule writes', () => {
     vi.mocked(recipients.isActiveRecipient).mockRejectedValue(new Error('authority unavailable'));
 
     await expect(
-      new CreateAutomationRule(work, vocabulary, recipients).execute({
+      new CreateAutomationRule(work, vocabulary, recipients, false).execute({
         organizationId,
         ruleAuthorUserId: userId,
         trigger: definition.trigger,
@@ -98,7 +141,7 @@ describe('automation rule writes', () => {
 
   it('checks the version before a no-op and saves only a genuine state change', async () => {
     const { work, transaction } = setup();
-    const command = new SetAutomationRuleEnabled(work);
+    const command = new SetAutomationRuleEnabled(work, false);
     const input = { organizationId, ruleId, enabled: true, expectedVersion: 1 };
 
     await expect(command.execute({ ...input, expectedVersion: 2 })).resolves.toEqual({
@@ -116,6 +159,41 @@ describe('automation rule writes', () => {
     });
     expect(transaction.save).toHaveBeenCalledOnce();
   });
+
+  it.each(gatedActions)(
+    'allows a stored $type rule to be disabled while its action is unavailable',
+    async (action) => {
+      const { work, transaction } = setup();
+      const rule = AutomationRule.create({ ...definition, action }, vocabulary);
+      vi.mocked(transaction.find).mockResolvedValue(rule);
+      const disabled = new SetAutomationRuleEnabled(work, false);
+      const input = { organizationId, ruleId, enabled: true, expectedVersion: 1 };
+
+      await expect(disabled.execute({ ...input, enabled: false })).resolves.toMatchObject({
+        status: 'updated',
+        rule: { enabled: false, version: 2 },
+      });
+      const disabledRule = rule.setEnabled(false);
+      expect(transaction.save).toHaveBeenCalledExactlyOnceWith(disabledRule, 1);
+      vi.mocked(transaction.find).mockResolvedValue(disabledRule);
+
+      await expect(disabled.execute(input)).resolves.toEqual({
+        status: 'version-mismatch',
+        version: 2,
+      });
+      await expect(disabled.execute({ ...input, expectedVersion: 2 })).resolves.toEqual({
+        status: 'action-unavailable',
+      });
+      expect(transaction.save).toHaveBeenCalledOnce();
+
+      await expect(
+        new SetAutomationRuleEnabled(work, true).execute({ ...input, expectedVersion: 2 }),
+      ).resolves.toMatchObject({ status: 'updated', rule: { enabled: true, version: 3 } });
+      expect(transaction.save).toHaveBeenCalledTimes(2);
+      vi.mocked(transaction.find).mockResolvedValue(null);
+      await expect(disabled.execute(input)).resolves.toEqual({ status: 'not-found' });
+    },
+  );
 
   it('returns not found and protects the version before deleting', async () => {
     const { work, transaction } = setup();
@@ -139,7 +217,7 @@ describe('automation rule writes', () => {
     const { work, transaction } = setup();
     vi.mocked(transaction.save).mockResolvedValue(false);
     await expect(
-      new SetAutomationRuleEnabled(work).execute({
+      new SetAutomationRuleEnabled(work, false).execute({
         organizationId,
         ruleId,
         enabled: false,

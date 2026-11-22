@@ -17,6 +17,7 @@ import type {
   OrganizationContext,
 } from '@cadenway/nest-common';
 import { SystemTransactionRunner, TenantTransactionRunner } from '@cadenway/nest-common/database';
+import { JobProducer } from '@cadenway/nest-jobs/runtime';
 import { Controller, Get, Injectable, Module } from '@nestjs/common';
 import type { BeforeApplicationShutdown } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -27,6 +28,10 @@ import { taskCreatedV1Schema } from '@cadenway/contracts/events/task-service';
 
 import { AppModule } from '../src/app.module.js';
 import { appConfigSchema } from '../src/config/app-config.js';
+import {
+  AUTOMATION_PURGE_RECEIPTS_QUEUE,
+  AUTOMATION_TASK_TRIGGER_QUEUE,
+} from '../src/config/job-queues.js';
 
 // The service as main.ts assembles it, on a disposable PostgreSQL and NATS. `@cadenway/nest-testing`
 // does not export its container fixtures yet and a service never depends on `testcontainers` itself,
@@ -55,6 +60,9 @@ const otherOrganizationId = '01938f6e-0000-7000-8000-000000000002';
 
 /** Camille Martin (CM), the member of Atelier Nord the mockup signs in as. */
 const camilleMartinId = '01938f6e-8a42-7d5b-b2c9-5e1f3a6d9c24';
+
+/** Number of migrations applied on an empty test database. */
+const migrationCount = 5;
 
 /** The tables of the platform module, as the kit names them. */
 const platformTables = [
@@ -311,6 +319,7 @@ describe('automation-service wiring', () => {
     vi.stubEnv('TASK_SERVICE_URL', `http://127.0.0.1:${String(address.port)}`);
     vi.stubEnv('INTERNAL_TOKEN_PRIVATE_JWK', JSON.stringify(automation.privateJwk));
     vi.stubEnv('AUTOMATION_TASK_TRIGGERS_ENABLED', 'true');
+    vi.stubEnv('AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED', 'false');
     vi.stubEnv('AUTOMATION_CURSOR_SIGNING_KEY', randomBytes(32).toString('hex'));
     vi.stubEnv(
       'INTERNAL_TOKEN_TRUSTED_ISSUERS',
@@ -371,12 +380,57 @@ describe('automation-service wiring', () => {
     );
 
     expect(tables.rows).toEqual(
-      ['automation_rules', 'automation_runs', ...platformTables].map((tablename) => ({
-        tablename,
-        tableowner: 'automation_migrator',
-      })),
+      ['automation_rules', 'automation_runs', 'automation_trigger_budget', ...platformTables].map(
+        (tablename) => ({
+          tablename,
+          tableowner: 'automation_migrator',
+        }),
+      ),
     );
-    expect(journal.rows).toEqual([{ applied: 3 }]);
+    expect(journal.rows).toEqual([{ applied: migrationCount }]);
+  });
+
+  it('serializes create and re-enable at the same enabled rule capacity', async () => {
+    const organizationId = '01938f6e-0000-7000-8000-000000000082';
+    const disabledRuleId = '01938f6e-0000-7000-8000-000000000083';
+    const system = service().get(SystemTransactionRunner);
+    await system.run(async ({ client }) => {
+      await client.query(
+        `insert into automation_rules (organization_id, id, rule_author_user_id, trigger, action, enabled)
+         select $1::uuid, case when n = 100 then $2::uuid else uuidv7() end,
+                $3, '{"type":"created"}'::jsonb, '{"type":"priority","priority":"haute"}'::jsonb,
+                n < 100
+         from generate_series(1, 100) n`,
+        [organizationId, disabledRuleId, camilleMartinId],
+      );
+    });
+    const token = await signer.sign('automation-service', {
+      actor: { type: 'user', id: camilleMartinId },
+      organizationId,
+      role: 'owner',
+    });
+    const [created, enabled] = await Promise.all([
+      request(service().getHttpServer())
+        .post('/internal/v1/automations')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', randomUUID())
+        .send({ trigger: { type: 'created' }, action: { type: 'priority', priority: 'haute' } }),
+      request(service().getHttpServer())
+        .patch(`/internal/v1/automations/${disabledRuleId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ enabled: true }),
+    ]);
+    expect([created.status, enabled.status]).toContain(503);
+    expect([created, enabled].find((response) => response.status === 503)?.body).toMatchObject({
+      code: 'automation.unavailable',
+    });
+    const enabledRules = await system.run(({ client }) =>
+      client.query(
+        'select count(*)::int as count from automation_rules where organization_id = $1 and enabled',
+        [organizationId],
+      ),
+    );
+    expect(enabledRules.rows).toEqual([{ count: 100 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -385,7 +439,18 @@ describe('automation-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 3 }]);
+    expect(journal.rows).toEqual([{ applied: migrationCount }]);
+  });
+
+  it('recreates the active-rule lookup index when upgrading an existing table', async () => {
+    const indexName = 'automation_rules_enabled_organization_created_id_index';
+    await migrator.query(`drop index public.${indexName}`);
+    await runMigrator();
+    const indexes = await migrator.query(
+      'select indisvalid as usable from pg_index where indexrelid = to_regclass($1)',
+      [`public.${indexName}`],
+    );
+    expect(indexes.rows).toEqual([{ usable: true }]);
   });
 
   it('replays rule creation per actor and authenticates the listing cursor', async () => {
@@ -466,6 +531,81 @@ describe('automation-service wiring', () => {
     expect(replay.body).toEqual(first.body);
   });
 
+  it('rejects new and reactivated rules for unavailable actions without changing stored rules', async () => {
+    const organizationId = '01938f6e-0000-7000-8000-000000000078';
+    const recipientId = '01938f6e-0000-7000-8000-000000000079';
+    const actions = [
+      { type: 'comment', body: 'Ready for review' },
+      { type: 'notify', userId: recipientId },
+    ];
+    const trigger = { type: 'created' };
+    const owner = {
+      actor: { type: 'user', id: camilleMartinId },
+      organizationId,
+      role: 'owner',
+    } as const;
+    const [approved, missing] = await Promise.all([
+      signer.sign('automation-service', {
+        ...owner,
+        scopes: [`automation:recipient:${recipientId}`],
+      }),
+      signer.sign('automation-service', owner),
+    ]);
+    const create = (authorization: string, action: (typeof actions)[number]) =>
+      request(service().getHttpServer())
+        .post('/internal/v1/automations')
+        .set('Authorization', `Bearer ${authorization}`)
+        .set('Idempotency-Key', randomUUID())
+        .send({ trigger, action });
+    const denied = await create(missing, { type: 'notify', userId: recipientId }).expect(422);
+    expect(denied.body).toMatchObject({ code: 'automation.recipient-ineligible' });
+    for (const action of actions) {
+      const unavailable = await create(approved, action).expect(503);
+      expect(unavailable.body).toMatchObject({ code: 'automation.unavailable' });
+      expect(unavailable.headers.location).toBeUndefined();
+    }
+
+    const system = service().get(SystemTransactionRunner);
+    const counts = await system.run(({ client }) =>
+      client.query(
+        `select
+           (select count(*)::int from automation_rules where organization_id = $1) as rules,
+           (select count(*)::int from idempotency_keys where organization_id = $1) as receipts`,
+        [organizationId],
+      ),
+    );
+    expect(counts.rows).toEqual([{ rules: 0, receipts: 0 }]);
+
+    for (const action of actions) {
+      const result = await system.run(({ client }) =>
+        client.query(
+          `insert into automation_rules (organization_id, rule_author_user_id, trigger, action)
+           values ($1, $2, $3, $4) returning id`,
+          [organizationId, camilleMartinId, trigger, action],
+        ),
+      );
+      const row = result.rows[0] as { readonly id: string } | undefined;
+      const id = row?.id;
+      if (id === undefined) throw new Error('Expected the stored rule ID.');
+      const update = (etag: string, body: { enabled: boolean; action?: typeof action }) =>
+        request(service().getHttpServer())
+          .patch(`/internal/v1/automations/${id}`)
+          .set('Authorization', `Bearer ${approved}`)
+          .set('If-Match', etag)
+          .send(body);
+      const disabled = await update('"1"', { enabled: false }).expect(200);
+      expect(disabled.body).toMatchObject({ enabled: false, version: 2, action });
+      const stale = await update('"1"', { enabled: true }).expect(412);
+      expect(stale.body).toMatchObject({ code: 'request.version-mismatch' });
+      const unavailable = await update('"2"', { enabled: true }).expect(503);
+      expect(unavailable.body).toMatchObject({ code: 'automation.unavailable' });
+      const invalid = await update('"2"', { enabled: true, action }).expect(400);
+      expect(invalid.body).toMatchObject({ code: 'request.invalid' });
+      const unchanged = await update('"2"', { enabled: false }).expect(200);
+      expect(unchanged.body).toMatchObject({ enabled: false, version: 2, action });
+    }
+  });
+
   it('forces row-level security on the tables that carry an organization', async () => {
     const tables = await migrator.query<{
       relname: string;
@@ -484,6 +624,7 @@ describe('automation-service wiring', () => {
     expect(tables.rows).toEqual([
       { relname: 'automation_rules', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'automation_runs', relrowsecurity: true, relforcerowsecurity: true },
+      { relname: 'automation_trigger_budget', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'event_versions', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'idempotency_keys', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'outbox_events', relrowsecurity: true, relforcerowsecurity: true },
@@ -492,10 +633,55 @@ describe('automation-service wiring', () => {
     expect(policies.rows).toEqual([
       { tablename: 'automation_rules', policyname: 'automation_rules_tenant_isolation' },
       { tablename: 'automation_runs', policyname: 'automation_runs_tenant_isolation' },
+      {
+        tablename: 'automation_trigger_budget',
+        policyname: 'automation_trigger_budget_tenant_isolation',
+      },
       { tablename: 'event_versions', policyname: 'event_versions_organization_isolation' },
       { tablename: 'idempotency_keys', policyname: 'idempotency_keys_organization_isolation' },
       { tablename: 'outbox_events', policyname: 'outbox_events_organization_isolation' },
     ]);
+  });
+
+  it('purges expired receipts with the system worker and leaves an unexpired sibling receipt', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const queue = AUTOMATION_PURGE_RECEIPTS_QUEUE.name;
+    const producer = service().get(JobProducer);
+    const receipts = [
+      { key: randomUUID(), expiresAfterHours: -1 },
+      { key: randomUUID(), expiresAfterHours: 1 },
+    ];
+    const liveKey = receipts.find((receipt) => receipt.expiresAfterHours > 0)?.key;
+    await system.run(async (scope) => {
+      for (const receipt of receipts) {
+        await scope.client.query(
+          `insert into idempotency_keys
+            (organization_id, key, request_fingerprint, response_status, response_headers, expires_at)
+           values ($1, $2, 'fixture', 201, '{}'::jsonb, statement_timestamp() + $3 * interval '1 hour')`,
+          [atelierNordId, receipt.key, receipt.expiresAfterHours],
+        );
+      }
+      await producer.enqueue(scope, queue, null);
+    });
+    try {
+      await vi.waitFor(
+        async () => {
+          const found = await system.run(({ client }) =>
+            client.query('select key from idempotency_keys where key = any($1::text[])', [
+              receipts.map(({ key }) => key),
+            ]),
+          );
+          expect(found.rows).toEqual([{ key: liveKey }]);
+        },
+        { timeout: 10_000 },
+      );
+    } finally {
+      await system.run(({ client }) =>
+        client.query('delete from idempotency_keys where key = any($1::text[])', [
+          receipts.map(({ key }) => key),
+        ]),
+      );
+    }
   });
 
   it('answers the liveness probe without a token', async () => {
@@ -663,10 +849,10 @@ describe('automation-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 3 }]);
+    expect(journal.rows).toEqual([{ applied: migrationCount }]);
   });
 
-  it('runs a created-task rule once through JetStream and records its execution', async () => {
+  it('records one execution without paging through nonmatching rules after a JetStream event', async () => {
     const organizationId = '01938f6e-0000-7000-8000-000000000075';
     const ownerToken = await signer.sign('automation-service', {
       actor: { type: 'user', id: camilleMartinId },
@@ -680,6 +866,32 @@ describe('automation-service wiring', () => {
       .send({ trigger: { type: 'created' }, action: { type: 'priority', priority: 'haute' } })
       .expect(201);
     const { ruleId } = created.body as { readonly ruleId: string };
+    const system = service().get(SystemTransactionRunner);
+    await system.run(({ client }) =>
+      client.query(
+        `insert into automation_rules (organization_id, rule_author_user_id, trigger, action, enabled, created_at)
+         select $1, $2,
+                case when n % 2 = 0 then '{"type":"status","status":"progress"}'::jsonb
+                     else '{"type":"created"}'::jsonb end,
+                '{"type":"priority","priority":"haute"}',
+                n % 2 = 0,
+                now() - interval '1 hour'
+           from generate_series(1, 40) as series(n)`,
+        [organizationId, camilleMartinId],
+      ),
+    );
+    await system.run(({ client }) =>
+      client.query(
+        `insert into automation_rules (organization_id, rule_author_user_id, trigger, action)
+         values ($1, $2, '{"type":"created"}', $3), ($1, $2, '{"type":"created"}', $4)`,
+        [
+          organizationId,
+          camilleMartinId,
+          { type: 'comment', body: 'Ready for review' },
+          { type: 'notify', userId: camilleMartinId },
+        ],
+      ),
+    );
     const event = taskCreatedV1Schema.parse({
       id: randomUUID(),
       occurredAt: new Date().toISOString(),
@@ -712,7 +924,6 @@ describe('automation-service wiring', () => {
         JSON.stringify(payload),
       );
     publish(event);
-    const system = service().get(SystemTransactionRunner);
     await vi.waitFor(
       async () => {
         const runs = await system.run(({ client }) =>
@@ -774,7 +985,7 @@ describe('automation-service wiring', () => {
       nextCursor: null,
     });
     expect((history.body as { readonly items: readonly unknown[] }).items).toHaveLength(1);
-    const [runs, outbox] = await Promise.all([
+    const [runs, outbox, jobs] = await Promise.all([
       system.run(({ client }) =>
         client.query('select id from automation_runs where organization_id = $1', [organizationId]),
       ),
@@ -785,9 +996,22 @@ describe('automation-service wiring', () => {
           [organizationId],
         ),
       ),
+      system.run(({ client }) =>
+        client.query(
+          `select name, data #>> '{payload,kind}' as kind, data #>> '{payload,ruleId}' as rule_id
+             from pgboss.job
+            where data #>> '{payload,source,id}' = $1 and data ->> 'organizationId' = $2
+            order by kind`,
+          [event.id, organizationId],
+        ),
+      ),
     ]);
     expect(runs.rows).toHaveLength(1);
     expect(outbox.rows).toHaveLength(1);
+    expect(jobs.rows).toEqual([
+      { name: AUTOMATION_TASK_TRIGGER_QUEUE.name, kind: 'action', rule_id: ruleId },
+      { name: AUTOMATION_TASK_TRIGGER_QUEUE.name, kind: 'page', rule_id: null },
+    ]);
     expect(taskCalls).toHaveLength(1);
   });
 

@@ -16,7 +16,7 @@ const project = `cadenway-automation-rules-test-${String(process.pid)}`;
 const organization = '01938f6e-0000-7000-8000-000000000001';
 const otherOrganization = '01938f6e-0000-7000-8000-000000000002';
 const actor = '01938f6e-0000-7000-8000-000000000003';
-const vocabulary = { statuses: ['todo'], priorities: ['high'] } as const;
+const vocabulary = { statuses: ['todo', 'review'], priorities: ['high'] } as const;
 
 function compose(...args: readonly string[]): string {
   return execFileSync(
@@ -134,5 +134,74 @@ describe('automation rule persistence', () => {
         unit.run(organization, (transaction) => transaction.find(ruleId)),
       ),
     ).rejects.toThrow();
+  });
+
+  it('filters trigger candidates before computing each page and its lookahead', async () => {
+    const tenant = '01938f6e-0000-7000-8000-000000000004';
+    const occurredAt = new Date('2026-11-21T08:00:00.000Z');
+    const future = new Date('2026-11-21T08:00:00.001Z');
+    const trigger = { type: 'status', status: 'todo' } as const;
+    const action = { type: 'priority', priority: 'high' } as const;
+    const fields = { createdAt: occurredAt, trigger, action, enabled: true, version: 1 };
+    const definitions = [
+      { ...fields, enabled: false },
+      { ...fields, trigger: { type: 'created' } },
+      { ...fields, trigger: { type: 'status', status: 'review' } },
+      { ...fields, action: { type: 'comment', body: 'Ready for review' } },
+      { ...fields, action: { type: 'notify', userId: actor } },
+      { ...fields, createdAt: future },
+      fields,
+      { ...fields, action: { type: 'assign', userId: actor } },
+    ] as const;
+    const ids = await inOrganization(tenant, () =>
+      unit.run(tenant, async (transaction) => {
+        const result: string[] = [];
+        for (const [index, definition] of definitions.entries()) {
+          const ruleId = `01938f6e-0000-7000-8000-00000000008${String(index)}`;
+          const rule = AutomationRule.restore(
+            { ...definition, organizationId: tenant, ruleAuthorUserId: actor, ruleId },
+            vocabulary,
+          );
+          await transaction.insert(rule);
+          result.push(ruleId);
+        }
+        return result;
+      }),
+    );
+    const query = {
+      after: null,
+      occurredAt,
+      trigger,
+      availableActions: ['assign', 'priority'],
+      limit: 1,
+    } as const;
+    const first = await inOrganization(tenant, () => reader.listTriggerCandidates(tenant, query));
+    expect(first.items.map((rule) => rule.snapshot().ruleId)).toEqual([ids[6]]);
+    expect(first.next).toEqual({ createdAt: occurredAt, ruleId: ids[6] });
+    const last = await inOrganization(tenant, () =>
+      reader.listTriggerCandidates(tenant, { ...query, after: first.next }),
+    );
+    expect(last.items.map((rule) => rule.snapshot().ruleId)).toEqual([ids[7]]);
+    expect(last.next).toBeNull();
+    const all = await inOrganization(tenant, () =>
+      reader.listTriggerCandidates(tenant, {
+        ...query,
+        limit: 100,
+        availableActions: ['assign', 'priority', 'comment', 'notify'],
+      }),
+    );
+    expect(all.items.map((rule) => rule.snapshot().ruleId)).toEqual([
+      ids[3],
+      ids[4],
+      ids[6],
+      ids[7],
+    ]);
+    await expect(
+      inOrganization(otherOrganization, () => reader.listTriggerCandidates(tenant, query)),
+    ).rejects.toThrow('Rule read organization does not match the tenant transaction');
+    const management = await inOrganization(tenant, () =>
+      reader.list(tenant, { after: null, limit: 100 }),
+    );
+    expect(management.items).toHaveLength(definitions.length);
   });
 });

@@ -38,6 +38,9 @@ export const automationRules = pgTable(
       table.createdAt,
       table.id,
     ),
+    index('automation_rules_enabled_organization_created_id_index')
+      .on(table.organizationId, table.createdAt, table.id)
+      .where(sql`${table.enabled}`),
     check('automation_rules_version_check', sql`${table.version} between 1 and 9007199254740991`),
     check('automation_rules_trigger_object_check', sql`jsonb_typeof(${table.trigger}) = 'object'`),
     check('automation_rules_action_object_check', sql`jsonb_typeof(${table.action}) = 'object'`),
