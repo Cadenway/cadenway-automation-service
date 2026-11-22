@@ -112,14 +112,18 @@ function version(header: string | undefined): number | null {
 function refuse(
   result:
     | { status: 'action-unavailable' }
+    | { status: 'enabled-capacity-exhausted' }
     | { status: 'not-found' }
     | { status: 'version-mismatch'; version: number },
 ): never {
-  if (result.status === 'action-unavailable') {
+  if (result.status === 'action-unavailable' || result.status === 'enabled-capacity-exhausted') {
     throw new ProblemException({
       status: 503,
       code: 'automation.unavailable',
-      detail: 'The automation action is unavailable.',
+      detail:
+        result.status === 'action-unavailable'
+          ? 'The automation action is unavailable.'
+          : 'The organization has reached its enabled automation rule limit.',
     });
   }
   if (result.status === 'not-found') {
@@ -204,7 +208,7 @@ export class AutomationsController {
         detail: 'The recipient is not an active organization member.',
       });
     }
-    if (result.status === 'action-unavailable') return refuse(result);
+    if (result.status !== 'created') return refuse(result);
     const rule = mapRule(result.rule);
     response.setHeader('Location', `/internal/v1/automations/${rule.ruleId}`);
     response.setHeader('ETag', formatEtag(rule.version));

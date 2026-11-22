@@ -32,6 +32,9 @@ export class CreateAutomationRule {
       return { status: 'action-unavailable' };
     }
     return this.work.run(input.organizationId, async (transaction) => {
+      if (!(await transaction.hasEnabledRuleCapacity())) {
+        return { status: 'enabled-capacity-exhausted' };
+      }
       const identity = await transaction.allocateIdentity();
       const rule = AutomationRule.create({ ...input, ...identity }, this.vocabulary);
       await transaction.insert(rule);

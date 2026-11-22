@@ -5,4 +5,5 @@ export type SetAutomationRuleEnabledOutput =
   | Readonly<{ status: 'updated'; rule: AutomationRuleState }>
   | Readonly<{ status: 'not-found' }>
   | Readonly<{ status: 'version-mismatch'; version: number }>
-  | Readonly<{ status: 'action-unavailable' }>;
+  | Readonly<{ status: 'action-unavailable' }>
+  | Readonly<{ status: 'enabled-capacity-exhausted' }>;

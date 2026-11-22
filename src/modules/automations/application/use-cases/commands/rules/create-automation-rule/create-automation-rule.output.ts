@@ -4,4 +4,5 @@ import type { AutomationRuleState } from '../../../../../domain/value-objects/ru
 export type CreateAutomationRuleOutput =
   | Readonly<{ status: 'created'; rule: AutomationRuleState }>
   | Readonly<{ status: 'recipient-not-active' }>
-  | Readonly<{ status: 'action-unavailable' }>;
+  | Readonly<{ status: 'action-unavailable' }>
+  | Readonly<{ status: 'enabled-capacity-exhausted' }>;

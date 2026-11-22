@@ -13,8 +13,10 @@ None.
 
 - `automation_rules` owns immutable conditions, actions and the account that created each rule.
 - `automation_runs` owns execution identities and action snapshots. Only applied runs appear in history.
+- `automation_trigger_budget` keeps the latest admission window for each tenant, without storing
+  event, task or actor identifiers.
 
-Both tables use forced organization row-level security.
+The three tables use forced organization row-level security.
 
 ## API
 
@@ -80,10 +82,22 @@ without an automatic replay.
 - Events from an `automation` actor are ignored to prevent action-triggered loops. Disabled or
   deleted rules are ineligible for new trigger decisions. An unchanged enablement keeps the
   current rule version.
-- A continuation advances through matching enabled rules with available actions by creation time
-  and ID in pages of up to 32. PostgreSQL filters candidates before pagination. Only rules already
-  created when the fact occurred are eligible. Independent status transitions are evaluated by
-  source event ID, regardless of arrival order.
+- Create and re-enable share a transaction lock and enforce a limit of 100 enabled rules per
+  organization. A full organization can still disable or delete rules. API writes that would
+  exceed this limit return the documented `503 automation.unavailable`. An unchanged enabled
+  rule consumes no additional capacity.
+- Each trigger scans at most the first 100 eligible rules ordered by creation time and ID.
+  PostgreSQL filters candidates before applying the limit. Only rules already created when the
+  fact occurred are eligible. Existing continuation jobs remain readable during rollout.
+  Independent status transitions are evaluated by source event ID, regardless of arrival order.
+- A tenant can add up to 256 jobs to the shared queue per minute. Each new fact outside this
+  budget is skipped. The worker retries admitted fanout that hits the budget. An entire fanout
+  commits or rolls back together. Replayed occurrences do not consume additional capacity.
+  `automation.trigger.admission.rejected` counts rejected admission attempts by stage.
+- With a Jobs kit that supports `organizationConcurrency`, trigger work is limited to one
+  concurrent job per organization across replicas. Each worker can process two jobs overall
+  so a busy tenant group leaves capacity for another. Existing ungrouped jobs can use either
+  slot until they finish or expire.
 - The tenant, rule and triggering event identify one execution across retries. Only applied
   actions enter history and emit an execution fact. A no-op, skipped or failed action does not.
 - A rule's delegation is recorded from the authenticated creator. The receiving service checks
@@ -96,8 +110,8 @@ actor-and-tenant-scoped idempotency when the caller supplies a key. Enablement a
 `If-Match`, when present, within the write transaction.
 
 The broker deduplicator commits the event receipt and the initial fanout job together. A fanout
-job commits the page's action jobs and continuation together. Occurrence keys use the source
-event ID plus the page position or rule ID. An action worker reserves its execution identity in
+job commits the action jobs and queue budget together. Occurrence keys use the source
+event ID plus the legacy page position or rule ID. An action worker reserves its execution identity in
 its own transaction and uses that identity as the downstream idempotency key. The downstream
 call runs outside PostgreSQL transactions. After the owner confirms it applied the action,
 Automation commits the successful execution and its outbox row together.

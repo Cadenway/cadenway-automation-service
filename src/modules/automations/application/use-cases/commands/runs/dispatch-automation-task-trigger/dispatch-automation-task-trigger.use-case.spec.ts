@@ -44,7 +44,7 @@ function setup(commentAndNotificationEnabled = false) {
 }
 
 describe('DispatchAutomationTaskTrigger', () => {
-  it('queues eligible actions and the next page atomically without a global rule cap', async () => {
+  it('queues one bounded set of actions and still accepts an already scheduled continuation', async () => {
     const { dispatch, list, enqueue, action, signal } = setup();
     const match = rule('10');
     const lastMatch = rule('11');
@@ -65,7 +65,7 @@ describe('DispatchAutomationTaskTrigger', () => {
     await dispatch.execute({ organizationId, signal, job: { kind: 'page', source, after: null } });
     const query = {
       after: null,
-      limit: 32,
+      limit: 100,
       occurredAt: new Date(source.occurredAt),
       trigger: { type: 'status', status: 'review' },
       availableActions: ['assign', 'priority'],
@@ -77,7 +77,6 @@ describe('DispatchAutomationTaskTrigger', () => {
       [
         { kind: 'action', source, ruleId: match.snapshot().ruleId },
         { kind: 'action', source, ruleId: last.ruleId },
-        next,
       ],
       signal,
     );
@@ -108,7 +107,7 @@ describe('DispatchAutomationTaskTrigger', () => {
 
     expect(list).toHaveBeenCalledExactlyOnceWith(organizationId, {
       after: null,
-      limit: 32,
+      limit: 100,
       occurredAt: new Date(source.occurredAt),
       trigger: { type: 'created' },
       availableActions: ['assign', 'priority', 'comment', 'notify'],

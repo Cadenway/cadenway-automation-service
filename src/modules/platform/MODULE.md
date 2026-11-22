@@ -9,7 +9,7 @@ Gives the tables of the service kit their place in this service's own migrations
   `@cadenway/nest-messaging/outbox`;
 - `idempotency_keys`, defined by `@cadenway/nest-common/database`.
 
-It holds no business rule, no use case, no route and no handler, and never will: product data and
+It holds no business rule, no use case and no route: product data and
 its rules belong to the business modules. The definition and the behavior of the tables belong to
 the kit, through `DatabaseModule`, `MessagingModule` and `OutboxModule` registered in
 `src/app.module.ts`.
@@ -35,7 +35,7 @@ no DDL right on them.
 ## API
 
 None. The `Idempotency-Key` interceptor of `DatabaseModule` (`idempotency: true`) stores the key and
-the response of a route marked `@Idempotent()` in `idempotency_keys`; no route exists yet.
+the response of a route marked `@Idempotent()` in `idempotency_keys`.
 
 ## Events emitted
 
@@ -58,12 +58,15 @@ consumed, through the PostgreSQL deduplicator of `OutboxModule`; no handler exis
 
 ## Transactions
 
-None of its own. The rows are written inside the units of work of others: an outbox row in the
+The rows are written inside the units of work of others: an outbox row in the
 transaction of the use case that changes the data (tenant runner, or system runner for an event
 without organization), a processed id and a version in the transaction of the handler, an
 idempotency key in the transaction the interceptor opens for its route. The relay locks, publishes
 and marks pending rows in system transactions, and purges sent rows after 7 days and processed ids
 after 14.
+
+`automation.purge-idempotency-receipts` runs every minute. It removes at most 500 expired API
+receipts in a system transaction and leaves locked rows for a future pass.
 
 ## Decisions
 

@@ -29,6 +29,9 @@ export class SetAutomationRuleEnabled {
       ) {
         return { status: 'action-unavailable' };
       }
+      if (input.enabled && !current.enabled && !(await transaction.hasEnabledRuleCapacity())) {
+        return { status: 'enabled-capacity-exhausted' };
+      }
       const changed = rule.setEnabled(input.enabled);
       if (changed !== rule && !(await transaction.save(changed, current.version))) {
         throw new Error('Locked automation rule changed before it could be saved.');

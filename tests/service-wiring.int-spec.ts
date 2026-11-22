@@ -17,6 +17,7 @@ import type {
   OrganizationContext,
 } from '@cadenway/nest-common';
 import { SystemTransactionRunner, TenantTransactionRunner } from '@cadenway/nest-common/database';
+import { JobProducer } from '@cadenway/nest-jobs/runtime';
 import { Controller, Get, Injectable, Module } from '@nestjs/common';
 import type { BeforeApplicationShutdown } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -27,7 +28,10 @@ import { taskCreatedV1Schema } from '@cadenway/contracts/events/task-service';
 
 import { AppModule } from '../src/app.module.js';
 import { appConfigSchema } from '../src/config/app-config.js';
-import { AUTOMATION_TASK_TRIGGER_QUEUE } from '../src/config/job-queues.js';
+import {
+  AUTOMATION_PURGE_RECEIPTS_QUEUE,
+  AUTOMATION_TASK_TRIGGER_QUEUE,
+} from '../src/config/job-queues.js';
 
 // The service as main.ts assembles it, on a disposable PostgreSQL and NATS. `@cadenway/nest-testing`
 // does not export its container fixtures yet and a service never depends on `testcontainers` itself,
@@ -56,6 +60,9 @@ const otherOrganizationId = '01938f6e-0000-7000-8000-000000000002';
 
 /** Camille Martin (CM), the member of Atelier Nord the mockup signs in as. */
 const camilleMartinId = '01938f6e-8a42-7d5b-b2c9-5e1f3a6d9c24';
+
+/** Number of migrations applied on an empty test database. */
+const migrationCount = 5;
 
 /** The tables of the platform module, as the kit names them. */
 const platformTables = [
@@ -373,12 +380,57 @@ describe('automation-service wiring', () => {
     );
 
     expect(tables.rows).toEqual(
-      ['automation_rules', 'automation_runs', ...platformTables].map((tablename) => ({
-        tablename,
-        tableowner: 'automation_migrator',
-      })),
+      ['automation_rules', 'automation_runs', 'automation_trigger_budget', ...platformTables].map(
+        (tablename) => ({
+          tablename,
+          tableowner: 'automation_migrator',
+        }),
+      ),
     );
-    expect(journal.rows).toEqual([{ applied: 3 }]);
+    expect(journal.rows).toEqual([{ applied: migrationCount }]);
+  });
+
+  it('serializes create and re-enable at the same enabled rule capacity', async () => {
+    const organizationId = '01938f6e-0000-7000-8000-000000000082';
+    const disabledRuleId = '01938f6e-0000-7000-8000-000000000083';
+    const system = service().get(SystemTransactionRunner);
+    await system.run(async ({ client }) => {
+      await client.query(
+        `insert into automation_rules (organization_id, id, rule_author_user_id, trigger, action, enabled)
+         select $1::uuid, case when n = 100 then $2::uuid else uuidv7() end,
+                $3, '{"type":"created"}'::jsonb, '{"type":"priority","priority":"haute"}'::jsonb,
+                n < 100
+         from generate_series(1, 100) n`,
+        [organizationId, disabledRuleId, camilleMartinId],
+      );
+    });
+    const token = await signer.sign('automation-service', {
+      actor: { type: 'user', id: camilleMartinId },
+      organizationId,
+      role: 'owner',
+    });
+    const [created, enabled] = await Promise.all([
+      request(service().getHttpServer())
+        .post('/internal/v1/automations')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', randomUUID())
+        .send({ trigger: { type: 'created' }, action: { type: 'priority', priority: 'haute' } }),
+      request(service().getHttpServer())
+        .patch(`/internal/v1/automations/${disabledRuleId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ enabled: true }),
+    ]);
+    expect([created.status, enabled.status]).toContain(503);
+    expect([created, enabled].find((response) => response.status === 503)?.body).toMatchObject({
+      code: 'automation.unavailable',
+    });
+    const enabledRules = await system.run(({ client }) =>
+      client.query(
+        'select count(*)::int as count from automation_rules where organization_id = $1 and enabled',
+        [organizationId],
+      ),
+    );
+    expect(enabledRules.rows).toEqual([{ count: 100 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -387,7 +439,18 @@ describe('automation-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 3 }]);
+    expect(journal.rows).toEqual([{ applied: migrationCount }]);
+  });
+
+  it('recreates the active-rule lookup index when upgrading an existing table', async () => {
+    const indexName = 'automation_rules_enabled_organization_created_id_index';
+    await migrator.query(`drop index public.${indexName}`);
+    await runMigrator();
+    const indexes = await migrator.query(
+      'select indisvalid as usable from pg_index where indexrelid = to_regclass($1)',
+      [`public.${indexName}`],
+    );
+    expect(indexes.rows).toEqual([{ usable: true }]);
   });
 
   it('replays rule creation per actor and authenticates the listing cursor', async () => {
@@ -561,6 +624,7 @@ describe('automation-service wiring', () => {
     expect(tables.rows).toEqual([
       { relname: 'automation_rules', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'automation_runs', relrowsecurity: true, relforcerowsecurity: true },
+      { relname: 'automation_trigger_budget', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'event_versions', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'idempotency_keys', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'outbox_events', relrowsecurity: true, relforcerowsecurity: true },
@@ -569,10 +633,55 @@ describe('automation-service wiring', () => {
     expect(policies.rows).toEqual([
       { tablename: 'automation_rules', policyname: 'automation_rules_tenant_isolation' },
       { tablename: 'automation_runs', policyname: 'automation_runs_tenant_isolation' },
+      {
+        tablename: 'automation_trigger_budget',
+        policyname: 'automation_trigger_budget_tenant_isolation',
+      },
       { tablename: 'event_versions', policyname: 'event_versions_organization_isolation' },
       { tablename: 'idempotency_keys', policyname: 'idempotency_keys_organization_isolation' },
       { tablename: 'outbox_events', policyname: 'outbox_events_organization_isolation' },
     ]);
+  });
+
+  it('purges expired receipts with the system worker and leaves an unexpired sibling receipt', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const queue = AUTOMATION_PURGE_RECEIPTS_QUEUE.name;
+    const producer = service().get(JobProducer);
+    const receipts = [
+      { key: randomUUID(), expiresAfterHours: -1 },
+      { key: randomUUID(), expiresAfterHours: 1 },
+    ];
+    const liveKey = receipts.find((receipt) => receipt.expiresAfterHours > 0)?.key;
+    await system.run(async (scope) => {
+      for (const receipt of receipts) {
+        await scope.client.query(
+          `insert into idempotency_keys
+            (organization_id, key, request_fingerprint, response_status, response_headers, expires_at)
+           values ($1, $2, 'fixture', 201, '{}'::jsonb, statement_timestamp() + $3 * interval '1 hour')`,
+          [atelierNordId, receipt.key, receipt.expiresAfterHours],
+        );
+      }
+      await producer.enqueue(scope, queue, null);
+    });
+    try {
+      await vi.waitFor(
+        async () => {
+          const found = await system.run(({ client }) =>
+            client.query('select key from idempotency_keys where key = any($1::text[])', [
+              receipts.map(({ key }) => key),
+            ]),
+          );
+          expect(found.rows).toEqual([{ key: liveKey }]);
+        },
+        { timeout: 10_000 },
+      );
+    } finally {
+      await system.run(({ client }) =>
+        client.query('delete from idempotency_keys where key = any($1::text[])', [
+          receipts.map(({ key }) => key),
+        ]),
+      );
+    }
   });
 
   it('answers the liveness probe without a token', async () => {
@@ -740,7 +849,7 @@ describe('automation-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 3 }]);
+    expect(journal.rows).toEqual([{ applied: migrationCount }]);
   });
 
   it('records one execution without paging through nonmatching rules after a JetStream event', async () => {

@@ -12,7 +12,7 @@ import { Module } from '@nestjs/common';
 
 import { appConfigSchema } from './config/app-config.js';
 import type { AppConfig } from './config/app-config.js';
-import { AUTOMATION_TASK_TRIGGER_QUEUE } from './config/job-queues.js';
+import { jobQueues } from './config/job-queues.js';
 import { AutomationsModule } from './modules/automations/automations.module.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
 
@@ -80,7 +80,7 @@ import { PlatformModule } from './modules/platform/platform.module.js';
       inject: [CONFIG],
       useFactory: (config: AppConfig) => ({
         connection: { connectionString: config.DATABASE_URL },
-        queues: [AUTOMATION_TASK_TRIGGER_QUEUE],
+        queues: jobQueues,
         // Scheduler capability also recovers timed-out attempts and supervises dead letters.
         capabilities: ['producer', 'worker', 'scheduler'],
         poolSize: 2,

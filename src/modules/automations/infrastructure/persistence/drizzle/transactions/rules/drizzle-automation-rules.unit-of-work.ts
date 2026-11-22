@@ -3,6 +3,7 @@ import { and, eq, sql } from 'drizzle-orm';
 
 import type { AutomationRulesTransaction } from '../../../../../application/ports/outbound/transactions/rules/automation-rules-transaction.port.js';
 import type { AutomationRulesUnitOfWork } from '../../../../../application/ports/outbound/transactions/rules/automation-rules-unit-of-work.port.js';
+import { maxEnabledAutomationRules } from '../../../../../domain/policies/rules/automation-rule-capacity.policy.js';
 import type { AutomationTaskVocabulary } from '../../../../../domain/value-objects/rules/automation-task-vocabulary.value-object.js';
 import { mapAutomationRule } from '../../mappers/rules/automation-rule.mapper.js';
 import { automationRules } from '../../schemas/rules/automation-rules.schema.js';
@@ -28,6 +29,24 @@ export class DrizzleAutomationRulesUnitOfWork implements AutomationRulesUnitOfWo
         throw new Error('Rule write organization does not match the tenant transaction.');
       }
       const transaction: AutomationRulesTransaction = {
+        hasEnabledRuleCapacity: async () => {
+          // All creates and re-enables contend on the same canonical UUID for this tenant.
+          // At READ COMMITTED the subsequent query sees the previous holder's changes.
+          await scope.db.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended('automation:enabled:' || ${organizationId}::uuid::text, 0))`,
+          );
+          const enabled = await scope.db
+            .select({ id: automationRules.id })
+            .from(automationRules)
+            .where(
+              and(
+                eq(automationRules.organizationId, organizationId),
+                sql`${automationRules.enabled}`,
+              ),
+            )
+            .limit(maxEnabledAutomationRules);
+          return enabled.length < maxEnabledAutomationRules;
+        },
         allocateIdentity: async () => {
           const result = await scope.client.query(
             "select uuidv7()::text as id, date_trunc('milliseconds', now()) as created_at",

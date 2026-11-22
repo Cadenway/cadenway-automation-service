@@ -4,6 +4,9 @@ import type { AutomationRuleIdentity } from '../../../../models/rules/automation
 /** Operations performed in one tenant-scoped rule write transaction. */
 export interface AutomationRulesTransaction {
   // #region Properties
+  /** Checks the enabled-rule limit under the organization's write lock. */
+  readonly hasEnabledRuleCapacity: () => Promise<boolean>;
+
   /** Allocates the rule identity and its creation timestamp inside this transaction. */
   readonly allocateIdentity: () => Promise<AutomationRuleIdentity>;
 

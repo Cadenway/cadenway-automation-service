@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
 import { runWithOrganizationContext } from '@cadenway/nest-common';
@@ -9,7 +10,7 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { AUTOMATION_TASK_TRIGGER_QUEUE } from '../../../../../../config/job-queues.js';
 import type { AutomationTaskTriggerJob } from '../../../../application/models/runs/automation-task-trigger-job.model.js';
@@ -32,9 +33,14 @@ function compose(...args: readonly string[]): string {
   );
 }
 
-function inOrganization<T>(work: () => Promise<T>): Promise<T> {
+function inOrganization<T>(work: () => Promise<T>, tenantId = organizationId): Promise<T> {
   return runWithOrganizationContext(
-    { organizationId, actor: { type: 'system', id: 'task-service' }, role: null, scopes: [] },
+    {
+      organizationId: tenantId,
+      actor: { type: 'system', id: 'task-service' },
+      role: null,
+      scopes: [],
+    },
     work,
   );
 }
@@ -131,5 +137,70 @@ describe('Automation trigger jobs', () => {
     expect(await counts()).toEqual({ receipts: 0, jobs: 0 });
     await admit(false);
     expect(await counts()).toEqual({ receipts: 1, jobs: 1 });
+  });
+
+  it('keeps the queue budget tenant scoped and admits work again after rollover', async () => {
+    const fullTenant = randomUUID();
+    const separateTenant = randomUUID();
+    const source = {
+      id: randomUUID(),
+      occurredAt: new Date().toISOString(),
+      taskKey: 'CAD-482',
+      trigger: { type: 'created', actorType: 'user' },
+    } as const;
+    const first: AutomationTaskTriggerJob = { kind: 'page', after: null, source };
+    const seedWindow = (past: boolean) =>
+      inOrganization(
+        () =>
+          runner.run(({ client }) =>
+            client.query(
+              `insert into automation_trigger_budget (organization_id, window_start, queued_count)
+             values ($1, date_trunc('minute', clock_timestamp()) - $2 * interval '1 minute', 256)
+           on conflict (organization_id)
+             do update set window_start = excluded.window_start, queued_count = excluded.queued_count`,
+              [fullTenant, past ? 1 : 0],
+            ),
+          ),
+        fullTenant,
+      );
+    const spend = (tenantId: string) =>
+      inOrganization(
+        () =>
+          runner.run(async ({ client }) => {
+            const result = await client.query(
+              'select queued_count from automation_trigger_budget where organization_id = $1',
+              [tenantId],
+            );
+            return result.rows[0];
+          }),
+        tenantId,
+      );
+    // Keep the assertions about a single time window away from the next minute.
+    await vi.waitFor(
+      () => {
+        expect(new Date().getUTCSeconds()).toBeLessThan(57);
+      },
+      {
+        timeout: 5_000,
+      },
+    );
+    await seedWindow(false);
+    await inOrganization(() => jobs.enqueue(fullTenant, [first], signal), fullTenant);
+    await expect(
+      inOrganization(
+        () => jobs.enqueue(fullTenant, [{ kind: 'action', ruleId: randomUUID(), source }], signal),
+        fullTenant,
+      ),
+    ).rejects.toThrow('exhausted its automation trigger budget');
+    expect(await spend(fullTenant)).toEqual({ queued_count: 256 });
+    await inOrganization(
+      () => jobs.enqueue(separateTenant, [first, first], signal),
+      separateTenant,
+    );
+    expect(await spend(separateTenant)).toEqual({ queued_count: 1 });
+
+    await seedWindow(true);
+    await inOrganization(() => jobs.enqueue(fullTenant, [first], signal), fullTenant);
+    expect(await spend(fullTenant)).toEqual({ queued_count: 1 });
   });
 });

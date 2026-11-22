@@ -41,7 +41,7 @@ export class DrizzleAutomationRulesReader
       organizationId,
       query,
       and(
-        eq(automationRules.enabled, true),
+        sql`${automationRules.enabled}`,
         lte(automationRules.createdAt, occurredAt),
         eq(sql<string>`(${automationRules.trigger} ->> 'type')`, trigger.type),
         trigger.type === 'status'

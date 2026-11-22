@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 
+import { PurgeIdempotencyReceipts } from './infrastructure/jobs/pg-boss/idempotency/purge-idempotency-receipts.adapter.js';
+
 /**
  * Class PlatformModule
  *
@@ -10,9 +12,8 @@ import { Module } from '@nestjs/common';
  * so that drizzle-kit, which reads `src/modules/<module>/infrastructure/persistence/*.schema.ts`
  * only, writes them into the migrations of the service.
  *
- * It declares no provider, controller or handler and holds no business rule: what reads and writes
- * the tables is the kit, through `DatabaseModule`, `MessagingModule` and `OutboxModule`, registered
- * in `AppModule`. See its `MODULE.md`.
+ * The kit reads and writes these tables. This module owns the local receipt retention schedule.
+ * See its `MODULE.md`.
  */
-@Module({})
+@Module({ providers: [PurgeIdempotencyReceipts] })
 export class PlatformModule {}

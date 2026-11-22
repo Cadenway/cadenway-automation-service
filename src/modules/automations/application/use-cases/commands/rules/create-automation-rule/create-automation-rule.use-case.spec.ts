@@ -31,6 +31,7 @@ function setup(): {
   readonly recipients: AutomationRecipientAuthority;
 } {
   const transaction: AutomationRulesTransaction = {
+    hasEnabledRuleCapacity: vi.fn().mockResolvedValue(true),
     allocateIdentity: vi.fn().mockResolvedValue({ ruleId, createdAt: definition.createdAt }),
     find: vi.fn().mockResolvedValue(AutomationRule.create(definition, vocabulary)),
     insert: vi.fn().mockResolvedValue(undefined),
@@ -51,6 +52,21 @@ function setup(): {
 }
 
 describe('automation rule writes', () => {
+  it('leaves the rule store unchanged when an organization has no enabled capacity', async () => {
+    const { work, transaction, recipients } = setup();
+    vi.mocked(transaction.hasEnabledRuleCapacity).mockResolvedValue(false);
+    const create = new CreateAutomationRule(work, vocabulary, recipients, false);
+    await expect(
+      create.execute({
+        organizationId,
+        ruleAuthorUserId: definition.ruleAuthorUserId,
+        trigger: definition.trigger,
+        action: definition.action,
+      }),
+    ).resolves.toEqual({ status: 'enabled-capacity-exhausted' });
+    expect(transaction.allocateIdentity).not.toHaveBeenCalled();
+    expect(transaction.insert).not.toHaveBeenCalled();
+  });
   it('creates a tenant rule only after recipient eligibility is confirmed', async () => {
     const { work, transaction, recipients } = setup();
     const command = new CreateAutomationRule(work, vocabulary, recipients, false);
