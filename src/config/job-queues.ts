@@ -1,8 +1,5 @@
 import type { JobQueueDeclaration } from '@cadenway/nest-jobs/provisioning';
 
-// Kept structurally compatible with the currently installed Kit during the package rollout.
-const triggerTenantConcurrency = { organizationConcurrency: 1 } as const;
-
 /** Retains abandoned work beyond the action window so a resumed worker can dead-letter it. */
 export const AUTOMATION_TASK_TRIGGER_QUEUE = {
   name: 'automation.dispatch-task-trigger',
@@ -11,7 +8,7 @@ export const AUTOMATION_TASK_TRIGGER_QUEUE = {
   retryDelayMaxSeconds: 120,
   expireInSeconds: 30,
   retentionSeconds: 48 * 60 * 60,
-  ...triggerTenantConcurrency,
+  organizationConcurrency: 1,
 } as const satisfies JobQueueDeclaration;
 
 /** Deletes expired API receipts in bounded system transactions. */

@@ -1,7 +1,9 @@
-import { idempotencyKeys, SystemTransactionRunner } from '@cadenway/nest-common/database';
+import {
+  purgeExpiredIdempotencyKeyBatch,
+  SystemTransactionRunner,
+} from '@cadenway/nest-common/database';
 import { JobScheduler, JobWorkerRegistry } from '@cadenway/nest-jobs/runtime';
 import { Injectable, type OnApplicationBootstrap } from '@nestjs/common';
-import { inArray, lte, sql } from 'drizzle-orm';
 
 import { AUTOMATION_PURGE_RECEIPTS_QUEUE } from '../../../../../../config/job-queues.js';
 
@@ -28,17 +30,9 @@ export class PurgeIdempotencyReceipts implements OnApplicationBootstrap {
       if (organizationId !== null)
         throw new Error('Automation receipt maintenance requires system scope.');
       signal.throwIfAborted();
-      await this.system.run(async ({ db }) => {
-        const expired = lte(idempotencyKeys.expiresAt, sql`statement_timestamp()`);
-        const candidates = db
-          .select({ id: idempotencyKeys.id })
-          .from(idempotencyKeys)
-          .where(expired)
-          .orderBy(idempotencyKeys.expiresAt, idempotencyKeys.id)
-          .limit(batchSize)
-          .for('update', { skipLocked: true });
-        await db.delete(idempotencyKeys).where(inArray(idempotencyKeys.id, candidates));
-      });
+      await this.system.run((transaction) =>
+        purgeExpiredIdempotencyKeyBatch(transaction, batchSize),
+      );
     });
   }
   // #endregion

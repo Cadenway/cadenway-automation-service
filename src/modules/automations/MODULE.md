@@ -94,10 +94,9 @@ without an automatic replay.
   budget is skipped. The worker retries admitted fanout that hits the budget. An entire fanout
   commits or rolls back together. Replayed occurrences do not consume additional capacity.
   `automation.trigger.admission.rejected` counts rejected admission attempts by stage.
-- With a Jobs kit that supports `organizationConcurrency`, trigger work is limited to one
-  concurrent job per organization across replicas. Each worker can process two jobs overall
-  so a busy tenant group leaves capacity for another. Existing ungrouped jobs can use either
-  slot until they finish or expire.
+- Trigger work is limited to one concurrent job per organization across replicas. Each worker
+  can process two jobs overall so a busy tenant group leaves capacity for another. Existing
+  ungrouped jobs can use either slot until they finish or expire.
 - The tenant, rule and triggering event identify one execution across retries. Only applied
   actions enter history and emit an execution fact. A no-op, skipped or failed action does not.
 - A rule's delegation is recorded from the authenticated creator. The receiving service checks
