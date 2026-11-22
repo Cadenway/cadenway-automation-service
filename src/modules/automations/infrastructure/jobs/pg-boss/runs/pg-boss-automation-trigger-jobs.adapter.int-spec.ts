@@ -114,7 +114,8 @@ describe('Automation trigger jobs', () => {
           const result = await client.query(
             `select
                (select count(*)::int from processed_events where consumer = $1 and event_id = $2) as receipts,
-               (select count(*)::int from pgboss.job where name = $3) as jobs`,
+               (select count(*)::int from pgboss.job where name = $3) as jobs,
+               (select min(group_id) from pgboss.job where name = $3) as "groupId"`,
             [durable, eventId, AUTOMATION_TASK_TRIGGER_QUEUE.name],
           );
           return result.rows[0];
@@ -128,15 +129,15 @@ describe('Automation trigger jobs', () => {
             eventId,
           ]);
           await jobs.enqueue(organizationId, [initial, initial], signal);
-          expect(await counts()).toEqual({ receipts: 1, jobs: 1 });
+          expect(await counts()).toEqual({ receipts: 1, jobs: 1, groupId: organizationId });
           if (rollback) throw new Error('Force the broker transaction to roll back');
         }),
       );
 
     await expect(admit(true)).rejects.toThrow('Force the broker transaction to roll back');
-    expect(await counts()).toEqual({ receipts: 0, jobs: 0 });
+    expect(await counts()).toEqual({ receipts: 0, jobs: 0, groupId: null });
     await admit(false);
-    expect(await counts()).toEqual({ receipts: 1, jobs: 1 });
+    expect(await counts()).toEqual({ receipts: 1, jobs: 1, groupId: organizationId });
   });
 
   it('keeps the queue budget tenant scoped and admits work again after rollover', async () => {
