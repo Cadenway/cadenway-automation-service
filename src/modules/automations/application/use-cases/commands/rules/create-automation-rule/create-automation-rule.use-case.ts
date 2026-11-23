@@ -1,6 +1,6 @@
 import { AutomationRule } from '../../../../../domain/aggregates/rules/automation-rule.aggregate.js';
+import type { AutomationAction } from '../../../../../domain/value-objects/rules/automation-action.value-object.js';
 import type { AutomationTaskVocabulary } from '../../../../../domain/value-objects/rules/automation-task-vocabulary.value-object.js';
-import { isAutomationActionAvailable } from '../../../../models/rules/automation-action-availability.model.js';
 import type { AutomationRecipientAuthority } from '../../../../ports/outbound/authorization/rules/automation-recipient-authority.port.js';
 import type { AutomationRulesUnitOfWork } from '../../../../ports/outbound/transactions/rules/automation-rules-unit-of-work.port.js';
 import type { CreateAutomationRuleInput } from './create-automation-rule.input.js';
@@ -14,7 +14,7 @@ export class CreateAutomationRule {
     private readonly work: AutomationRulesUnitOfWork,
     private readonly vocabulary: AutomationTaskVocabulary,
     private readonly recipients: AutomationRecipientAuthority,
-    private readonly commentAndNotificationEnabled: boolean,
+    private readonly availableActions: readonly AutomationAction['type'][],
   ) {}
   // #endregion
 
@@ -28,7 +28,7 @@ export class CreateAutomationRule {
     ) {
       return { status: 'recipient-not-active' };
     }
-    if (!isAutomationActionAvailable(action.type, this.commentAndNotificationEnabled)) {
+    if (!this.availableActions.includes(action.type)) {
       return { status: 'action-unavailable' };
     }
     return this.work.run(input.organizationId, async (transaction) => {

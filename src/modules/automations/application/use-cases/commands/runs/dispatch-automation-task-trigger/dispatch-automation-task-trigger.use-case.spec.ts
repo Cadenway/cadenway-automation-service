@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { AutomationRule } from '../../../../../domain/aggregates/rules/automation-rule.aggregate.js';
+import { availableAutomationActionTypes } from '../../../../models/rules/automation-action-availability.model.js';
 import type { AutomationTaskTriggerJob } from '../../../../models/runs/automation-task-trigger-job.model.js';
 import type { AutomationTriggerJobs } from '../../../../ports/outbound/jobs/runs/automation-trigger-jobs.port.js';
 import type { AutomationTriggerRulesReader } from '../../../../ports/outbound/persistence/rules/automation-trigger-rules-reader.port.js';
@@ -30,7 +31,7 @@ function rule(last: string): AutomationRule {
   );
 }
 
-function setup(commentAndNotificationEnabled = false) {
+function setup(commentsEnabled = false, notificationConfigured = false, admissionEnabled = true) {
   const list = vi.fn<AutomationTriggerRulesReader['listTriggerCandidates']>();
   const enqueue = vi.fn<AutomationTriggerJobs['enqueue']>();
   const action = vi.fn<ExecuteAutomationRule['execute']>().mockResolvedValue({ status: 'ignored' });
@@ -38,7 +39,8 @@ function setup(commentAndNotificationEnabled = false) {
     { listTriggerCandidates: list },
     { enqueue },
     { execute: action },
-    commentAndNotificationEnabled,
+    availableAutomationActionTypes(commentsEnabled, notificationConfigured),
+    admissionEnabled,
   );
   return { list, enqueue, action, dispatch, signal: new AbortController().signal };
 }
@@ -95,7 +97,7 @@ describe('DispatchAutomationTaskTrigger', () => {
   });
 
   it('queries all supported actions after rollout and enqueues nothing for an empty page', async () => {
-    const { dispatch, list, enqueue, signal } = setup(true);
+    const { dispatch, list, enqueue, signal } = setup(true, true);
     const created = { ...source, trigger: { type: 'created', actorType: 'user' } } as const;
     list.mockResolvedValue({ items: [], next: null });
 
@@ -115,6 +117,33 @@ describe('DispatchAutomationTaskTrigger', () => {
     expect(enqueue).not.toHaveBeenCalled();
   });
 
+  it('queries Task comments even when the Notification transport is absent', async () => {
+    const { dispatch, list, signal } = setup(true);
+    list.mockResolvedValue({ items: [], next: null });
+
+    await dispatch.execute({ organizationId, signal, job: { kind: 'page', source, after: null } });
+
+    expect(list).toHaveBeenCalledWith(
+      organizationId,
+      expect.objectContaining({ availableActions: ['assign', 'priority', 'comment'] }),
+    );
+  });
+
+  it('skips fanout and only resumes existing reservations when admission is paused', async () => {
+    const { dispatch, list, enqueue, action, signal } = setup(true, true, false);
+    const { ruleId } = rule('10').snapshot();
+
+    await dispatch.execute({ organizationId, signal, job: { kind: 'page', source, after: null } });
+    await dispatch.execute({ organizationId, signal, job: { kind: 'action', source, ruleId } });
+
+    expect(list).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(action).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ ruleId, sourceEventId: source.id, allowNewReservation: false }),
+      signal,
+    );
+  });
+
   it('forwards the original fact and source ID unchanged to the command for one action', async () => {
     const { dispatch, list, enqueue, action, signal } = setup();
     const { ruleId } = rule('10').snapshot();
@@ -125,6 +154,7 @@ describe('DispatchAutomationTaskTrigger', () => {
         ruleId,
         sourceEventId: source.id,
         taskKey: source.taskKey,
+        allowNewReservation: true,
         fact: { organizationId, ...source.trigger },
       },
       signal,

@@ -36,6 +36,13 @@
       "when": 1795366775553,
       "tag": "0004_automation_enabled_rules_lookup",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795423445587,
+      "tag": "0005_outbox_leases",
+      "breakpoints": true
     }
   ]
 }

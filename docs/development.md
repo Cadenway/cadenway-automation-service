@@ -144,7 +144,7 @@ version; it connects as the migrator role of `MIGRATION_DATABASE_URL` and applie
 does not list yet.
 
 The tables of the service kit reach the migrations through the platform module: the outbox,
-processed-ids and versions tables of `@cadenway/nest-messaging/outbox` and `idempotency_keys` of
+processed-ids and versions tables of `@cadenway/nest-messaging/outbox/schema` and `idempotency_keys` of
 `@cadenway/nest-common/database` are re-exported from
 `src/modules/platform/infrastructure/persistence/`. A kit version that changes one ships a note
 in its changeset: upgrade the package, generate, review the new migration.

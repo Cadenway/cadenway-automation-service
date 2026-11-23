@@ -1,5 +1,5 @@
+import type { AutomationAction } from '../../../../../domain/value-objects/rules/automation-action.value-object.js';
 import type { AutomationRun } from '../../../../models/runs/automation-run.model.js';
-import { isAutomationActionAvailable } from '../../../../models/rules/automation-action-availability.model.js';
 import type { AutomationActionExecutor } from '../../../../ports/outbound/actions/runs/automation-action-executor.port.js';
 import type { AutomationRunsUnitOfWork } from '../../../../ports/outbound/transactions/runs/automation-runs-unit-of-work.port.js';
 import type { ExecuteAutomationRuleInput } from './execute-automation-rule.input.js';
@@ -16,7 +16,7 @@ export class ExecuteAutomationRule {
   public constructor(
     private readonly work: AutomationRunsUnitOfWork,
     private readonly actions: AutomationActionExecutor,
-    private readonly commentAndNotificationEnabled: boolean,
+    private readonly availableActions: readonly AutomationAction['type'][],
     private readonly now: () => Date = () => new Date(),
   ) {}
   // #endregion
@@ -34,12 +34,13 @@ export class ExecuteAutomationRule {
     const run = await this.work.run(input.organizationId, async (transaction) => {
       const existing = await transaction.findBySource(input.ruleId, input.sourceEventId);
       if (existing !== null) return existing;
+      if (!input.allowNewReservation) return null;
       const rule = await transaction.lockRule(input.ruleId);
       const concurrent = await transaction.findBySource(input.ruleId, input.sourceEventId);
       if (concurrent !== null) return concurrent;
       if (rule?.matches(input.fact) !== true) return null;
       const state = rule.snapshot();
-      if (!isAutomationActionAvailable(state.action.type, this.commentAndNotificationEnabled)) {
+      if (!this.availableActions.includes(state.action.type)) {
         return null;
       }
       return transaction.reserve({

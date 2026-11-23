@@ -1,4 +1,4 @@
-import { isAutomationActionAvailable } from '../../../../models/rules/automation-action-availability.model.js';
+import type { AutomationAction } from '../../../../../domain/value-objects/rules/automation-action.value-object.js';
 import type { AutomationRulesUnitOfWork } from '../../../../ports/outbound/transactions/rules/automation-rules-unit-of-work.port.js';
 import type { SetAutomationRuleEnabledInput } from './set-automation-rule-enabled.input.js';
 import type { SetAutomationRuleEnabledOutput } from './set-automation-rule-enabled.output.js';
@@ -9,7 +9,7 @@ export class SetAutomationRuleEnabled {
   /** Binds the rule transaction and configured action support. */
   public constructor(
     private readonly work: AutomationRulesUnitOfWork,
-    private readonly commentAndNotificationEnabled: boolean,
+    private readonly availableActions: readonly AutomationAction['type'][],
   ) {}
   // #endregion
 
@@ -23,10 +23,7 @@ export class SetAutomationRuleEnabled {
       if (input.expectedVersion !== null && input.expectedVersion !== current.version) {
         return { status: 'version-mismatch', version: current.version };
       }
-      if (
-        input.enabled &&
-        !isAutomationActionAvailable(current.action.type, this.commentAndNotificationEnabled)
-      ) {
+      if (input.enabled && !this.availableActions.includes(current.action.type)) {
         return { status: 'action-unavailable' };
       }
       if (input.enabled && !current.enabled && !(await transaction.hasEnabledRuleCapacity())) {

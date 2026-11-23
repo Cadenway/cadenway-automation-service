@@ -259,13 +259,12 @@ describe('AutomationActionHttpAdapter', () => {
     );
   });
 
-  it('makes no call for a disabled, invalid or already cancelled action', async () => {
+  it('makes no call for an unconfigured notification, invalid or already cancelled action', async () => {
     await withActionServer(
       signer,
       () => applied,
       async (adapter, calls) => {
         for (const action of [
-          { type: 'comment', body: 'Un passage en revue est nécessaire.' },
           { type: 'notify', userId: recipientId },
           { type: 'priority', priority: 'invalid-priority' },
         ] as const) {
@@ -280,7 +279,7 @@ describe('AutomationActionHttpAdapter', () => {
     );
   });
 
-  it('dispatches a private comment receipt to Task with a canonical signed rule and no extra fields', async () => {
+  it('recovers a comment with Task alone using the original key and signed rule', async () => {
     const body = 'Un passage en revue est nécessaire.';
     await withActionServer(
       signer,
@@ -307,7 +306,6 @@ describe('AutomationActionHttpAdapter', () => {
           actor: { type: 'automation', id: ruleId },
         });
       },
-      true,
     );
   });
 

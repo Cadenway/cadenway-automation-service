@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 
@@ -75,7 +76,7 @@ describe('appConfigSchema', () => {
     expect(config.NOTIFICATION_SERVICE_URL).toBeUndefined();
   });
 
-  it('requires Task triggers and the Notification URL to enable the two new actions', () => {
+  it('requires the signed Task transport for comment admission', () => {
     const config = appConfigSchema.safeParse({
       ...complete,
       AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED: 'true',
@@ -83,9 +84,24 @@ describe('appConfigSchema', () => {
     });
     if (config.success) throw new Error('Expected config validation to fail.');
     expect(config.error.issues.map((issue) => issue.path[0])).toEqual([
-      'AUTOMATION_TASK_TRIGGERS_ENABLED',
-      'NOTIFICATION_SERVICE_URL',
+      'INTERNAL_TOKEN_PRIVATE_JWK',
+      'TASK_SERVICE_URL',
     ]);
+  });
+
+  it('accepts Task comments with notification transport absent and trigger admission paused', () => {
+    const privateJwk = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' });
+    const config = loadConfig(appConfigSchema, {
+      ...complete,
+      AUTOMATION_TASK_TRIGGERS_ENABLED: 'false',
+      AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED: 'true',
+      INTERNAL_TOKEN_PRIVATE_JWK: JSON.stringify({ ...privateJwk, kid: 'test-automation' }),
+      TASK_SERVICE_URL: 'http://localhost:3013',
+    });
+
+    expect(config.AUTOMATION_TASK_TRIGGERS_ENABLED).toBe(false);
+    expect(config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED).toBe(true);
+    expect(config.NOTIFICATION_SERVICE_URL).toBeUndefined();
   });
 
   it('refuses to start without the database, the broker, the audience or the trusted issuers', () => {

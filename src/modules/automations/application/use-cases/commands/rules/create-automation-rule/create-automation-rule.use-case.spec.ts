@@ -8,6 +8,8 @@ import { DeleteAutomationRule } from '../delete-automation-rule/delete-automatio
 import { SetAutomationRuleEnabled } from '../set-automation-rule-enabled/set-automation-rule-enabled.use-case.js';
 import { CreateAutomationRule } from './create-automation-rule.use-case.js';
 
+const baseActions = ['assign', 'priority'] as const;
+const allActions = [...baseActions, 'comment', 'notify'] as const;
 const organizationId = '019a5f3c-8d2e-7c4a-9b1f-3e5d7a9c1b31';
 const ruleId = '019a700b-1a2b-7c3d-8e4f-5a6b7c8d9e01';
 const userId = '019a5f3c-a0b1-7c2d-9e3f-5a6b7c8d9e32';
@@ -55,7 +57,7 @@ describe('automation rule writes', () => {
   it('leaves the rule store unchanged when an organization has no enabled capacity', async () => {
     const { work, transaction, recipients } = setup();
     vi.mocked(transaction.hasEnabledRuleCapacity).mockResolvedValue(false);
-    const create = new CreateAutomationRule(work, vocabulary, recipients, false);
+    const create = new CreateAutomationRule(work, vocabulary, recipients, baseActions);
     await expect(
       create.execute({
         organizationId,
@@ -69,7 +71,7 @@ describe('automation rule writes', () => {
   });
   it('creates a tenant rule only after recipient eligibility is confirmed', async () => {
     const { work, transaction, recipients } = setup();
-    const command = new CreateAutomationRule(work, vocabulary, recipients, false);
+    const command = new CreateAutomationRule(work, vocabulary, recipients, baseActions);
 
     const result = await command.execute({
       organizationId,
@@ -97,13 +99,13 @@ describe('automation rule writes', () => {
         action,
       };
       await expect(
-        new CreateAutomationRule(work, vocabulary, recipients, false).execute(input),
+        new CreateAutomationRule(work, vocabulary, recipients, baseActions).execute(input),
       ).resolves.toEqual({ status: 'action-unavailable' });
       expect(transaction.allocateIdentity).not.toHaveBeenCalled();
       expect(transaction.insert).not.toHaveBeenCalled();
 
       await expect(
-        new CreateAutomationRule(work, vocabulary, recipients, true).execute(input),
+        new CreateAutomationRule(work, vocabulary, recipients, allActions).execute(input),
       ).resolves.toMatchObject({ status: 'created', rule: { enabled: true, action } });
       expect(transaction.insert).toHaveBeenCalledOnce();
     },
@@ -114,7 +116,7 @@ describe('automation rule writes', () => {
     vi.mocked(recipients.isActiveRecipient).mockResolvedValue(false);
 
     await expect(
-      new CreateAutomationRule(work, vocabulary, recipients, false).execute({
+      new CreateAutomationRule(work, vocabulary, recipients, baseActions).execute({
         organizationId,
         ruleAuthorUserId: userId,
         trigger: definition.trigger,
@@ -129,7 +131,7 @@ describe('automation rule writes', () => {
     vi.mocked(recipients.isActiveRecipient).mockRejectedValue(new Error('authority unavailable'));
 
     await expect(
-      new CreateAutomationRule(work, vocabulary, recipients, false).execute({
+      new CreateAutomationRule(work, vocabulary, recipients, baseActions).execute({
         organizationId,
         ruleAuthorUserId: userId,
         trigger: definition.trigger,
@@ -141,7 +143,7 @@ describe('automation rule writes', () => {
 
   it('checks the version before a no-op and saves only a genuine state change', async () => {
     const { work, transaction } = setup();
-    const command = new SetAutomationRuleEnabled(work, false);
+    const command = new SetAutomationRuleEnabled(work, baseActions);
     const input = { organizationId, ruleId, enabled: true, expectedVersion: 1 };
 
     await expect(command.execute({ ...input, expectedVersion: 2 })).resolves.toEqual({
@@ -166,7 +168,7 @@ describe('automation rule writes', () => {
       const { work, transaction } = setup();
       const rule = AutomationRule.create({ ...definition, action }, vocabulary);
       vi.mocked(transaction.find).mockResolvedValue(rule);
-      const disabled = new SetAutomationRuleEnabled(work, false);
+      const disabled = new SetAutomationRuleEnabled(work, baseActions);
       const input = { organizationId, ruleId, enabled: true, expectedVersion: 1 };
 
       await expect(disabled.execute({ ...input, enabled: false })).resolves.toMatchObject({
@@ -187,7 +189,7 @@ describe('automation rule writes', () => {
       expect(transaction.save).toHaveBeenCalledOnce();
 
       await expect(
-        new SetAutomationRuleEnabled(work, true).execute({ ...input, expectedVersion: 2 }),
+        new SetAutomationRuleEnabled(work, allActions).execute({ ...input, expectedVersion: 2 }),
       ).resolves.toMatchObject({ status: 'updated', rule: { enabled: true, version: 3 } });
       expect(transaction.save).toHaveBeenCalledTimes(2);
       vi.mocked(transaction.find).mockResolvedValue(null);
@@ -217,7 +219,7 @@ describe('automation rule writes', () => {
     const { work, transaction } = setup();
     vi.mocked(transaction.save).mockResolvedValue(false);
     await expect(
-      new SetAutomationRuleEnabled(work, false).execute({
+      new SetAutomationRuleEnabled(work, baseActions).execute({
         organizationId,
         ruleId,
         enabled: false,

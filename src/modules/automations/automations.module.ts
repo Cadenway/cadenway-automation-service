@@ -13,6 +13,7 @@ import { Module } from '@nestjs/common';
 
 import type { AppConfig } from '../../config/app-config.js';
 import { AUTOMATION_TASK_TRIGGER_QUEUE } from '../../config/job-queues.js';
+import { availableAutomationActionTypes } from './application/models/rules/automation-action-availability.model.js';
 import { AdmitAutomationTaskTrigger } from './application/use-cases/commands/runs/admit-automation-task-trigger/admit-automation-task-trigger.use-case.js';
 import { DispatchAutomationTaskTrigger } from './application/use-cases/commands/runs/dispatch-automation-task-trigger/dispatch-automation-task-trigger.use-case.js';
 import { ExecuteAutomationRule } from './application/use-cases/commands/runs/execute-automation-rule/execute-automation-rule.use-case.js';
@@ -37,6 +38,13 @@ import { AutomationTriggerJobHandler } from './presentation/jobs/handlers/runs/a
 import { TaskAutomationTriggerHandler } from './presentation/messaging/handlers/task/task-automation-trigger.handler.js';
 
 const vocabulary = { statuses: STATUS_KEYS, priorities: PRIORITY_KEYS };
+
+function configuredActions(config: AppConfig): ReturnType<typeof availableAutomationActionTypes> {
+  return availableAutomationActionTypes(
+    config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED,
+    config.NOTIFICATION_SERVICE_URL !== undefined,
+  );
+}
 
 /** Composition boundary for organization-scoped automation rules and their execution history. */
 @Module({
@@ -82,17 +90,14 @@ const vocabulary = { statuses: STATUS_KEYS, priorities: PRIORITY_KEYS };
               );
             },
           },
-          config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED,
+          configuredActions(config),
         ),
     },
     {
       provide: SetAutomationRuleEnabled,
       inject: [DrizzleAutomationRulesUnitOfWork, CONFIG],
       useFactory: (work: DrizzleAutomationRulesUnitOfWork, config: AppConfig) =>
-        new SetAutomationRuleEnabled(
-          work,
-          config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED,
-        ),
+        new SetAutomationRuleEnabled(work, configuredActions(config)),
     },
     {
       provide: DeleteAutomationRule,
@@ -139,21 +144,15 @@ const vocabulary = { statuses: STATUS_KEYS, priorities: PRIORITY_KEYS };
         outboxWriter: OutboxWriter,
         jobs: PgBossAutomationTriggerJobs,
       ) => {
-        if (!config.AUTOMATION_TASK_TRIGGERS_ENABLED) return null;
         const privateJwk = config.INTERNAL_TOKEN_PRIVATE_JWK;
         const baseUrl = config.TASK_SERVICE_URL;
-        if (privateJwk === undefined || baseUrl === undefined) {
-          throw new Error('The Task action transport is not configured.');
-        }
+        if (privateJwk === undefined || baseUrl === undefined) return null;
         const signer = await InternalTokenSigner.create({
           issuer: config.INTERNAL_TOKEN_ISSUER,
           privateJwk,
         });
-        const commentAndNotificationEnabled =
-          config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED;
-        const notificationUrl = commentAndNotificationEnabled
-          ? config.NOTIFICATION_SERVICE_URL
-          : undefined;
+        const availableActions = configuredActions(config);
+        const notificationUrl = config.NOTIFICATION_SERVICE_URL;
         const actions = new AutomationActionHttpAdapter(
           new InternalHttpClient({
             service: 'task-service',
@@ -177,8 +176,9 @@ const vocabulary = { statuses: STATUS_KEYS, priorities: PRIORITY_KEYS };
         const dispatch = new DispatchAutomationTaskTrigger(
           new DrizzleAutomationRulesReader(runner, vocabulary),
           jobs,
-          new ExecuteAutomationRule(work, actions, commentAndNotificationEnabled),
-          commentAndNotificationEnabled,
+          new ExecuteAutomationRule(work, actions, availableActions),
+          availableActions,
+          config.AUTOMATION_TASK_TRIGGERS_ENABLED,
         );
         return new AutomationTriggerJobHandler(
           workers,
