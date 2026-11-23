@@ -52,7 +52,8 @@ When `AUTOMATION_TASK_TRIGGERS_ENABLED` is enabled, the service registers
 for the published `evt.task.created.v1` and `evt.task.status-changed.v1` subjects. First activation
 starts at newly published events. Existing consumers retain their position. Activation is off by
 default and requires the broker permissions and compatible downstream action endpoints. Setting
-it to false pauses new reservations and fanout. Keep the Task URL and signing key configured
+it to false pauses new reservations and fanout. The paused worker acknowledges queued fanout
+and unreserved actions without starting them. Keep the Task URL and signing key configured
 during a pause so the worker can settle reservations already committed to PostgreSQL.
 
 Assignment and priority use the Task action endpoint.
