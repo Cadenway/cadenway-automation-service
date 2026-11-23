@@ -6,7 +6,7 @@ Gives the tables of the service kit their place in this service's own migrations
 `src/modules/*/infrastructure/persistence/drizzle/schemas/*/*.schema.ts` only. A kit table enters the migration history through a schema re-export in this module. It owns:
 
 - `outbox_events`, `processed_events` and `event_versions`, defined by
-  `@cadenway/nest-messaging/outbox`;
+  `@cadenway/nest-messaging/outbox/schema`;
 - `idempotency_keys`, defined by `@cadenway/nest-common/database`.
 
 It holds no business rule, no use case and no route: product data and
@@ -21,16 +21,22 @@ transaction runners.
 
 ## Owned tables
 
-| Table              | Defined by                        | Organization scoping                                                         |
-| ------------------ | --------------------------------- | ---------------------------------------------------------------------------- |
-| `outbox_events`    | `@cadenway/nest-messaging/outbox` | `organization_id`, null for an event outside any organization; policy forced |
-| `processed_events` | `@cadenway/nest-messaging/outbox` | None: consumer and event id only, no organization data, no policy            |
-| `event_versions`   | `@cadenway/nest-messaging/outbox` | `organization_id`, part of the unique key; policy forced                     |
-| `idempotency_keys` | `@cadenway/nest-common/database`  | `organization_id`, part of the unique key; policy forced                     |
+| Table              | Defined by                               | Organization scoping                                                         |
+| ------------------ | ---------------------------------------- | ---------------------------------------------------------------------------- |
+| `outbox_events`    | `@cadenway/nest-messaging/outbox/schema` | `organization_id`, null for an event outside any organization; policy forced |
+| `processed_events` | `@cadenway/nest-messaging/outbox/schema` | None: consumer and event id only, no organization data, no policy            |
+| `event_versions`   | `@cadenway/nest-messaging/outbox/schema` | `organization_id`, part of the unique key; policy forced                     |
+| `idempotency_keys` | `@cadenway/nest-common/database`         | `organization_id`, part of the unique key; policy forced                     |
 
 Created by `migrations/0000_platform_tables.sql`, owned by the migrator role
 `automation_migrator`. The application role `automation_app` reads and writes their rows and holds
 no DDL right on them.
+
+`0005_outbox_leases.sql` adds nullable lease fields and checks. After the Drizzle commit, the dedicated
+migrator connection uses the kit to finish the concurrent expiry index and validate the checks.
+Re-running the migrator resumes finalization after interruption. Automation continues to use the
+existing relay and its original status transitions. Keep the expanded schema when rolling back the
+application.
 
 ## API
 
@@ -39,14 +45,13 @@ the response of a route marked `@Idempotent()` in `idempotency_keys`.
 
 ## Events emitted
 
-None. The outbox relay of `OutboxModule` publishes the rows the use cases of the business modules
-append with `OutboxWriter.append`; `@cadenway/contracts` defines no event of this service yet, so
-nothing is appended.
+Platform defines no events. The outbox relay of `OutboxModule` publishes rows that business use
+cases append through `OutboxWriter`, including `automation.executed.v1`.
 
 ## Events consumed
 
-None. `processed_events` and `event_versions` record what the handlers of the business modules
-consumed, through the PostgreSQL deduplicator of `OutboxModule`; no handler exists yet.
+Platform registers no subscriptions. The PostgreSQL deduplicator of `OutboxModule` supports
+business handlers that record processed events and versions.
 
 ## Invariants
 

@@ -51,14 +51,16 @@ When `AUTOMATION_TASK_TRIGGERS_ENABLED` is enabled, the service registers
 `automation-service__run-task-created-rules` and `automation-service__run-task-status-changed-rules`
 for the published `evt.task.created.v1` and `evt.task.status-changed.v1` subjects. First activation
 starts at newly published events. Existing consumers retain their position. Activation is off by
-default and requires the broker permissions and compatible downstream action endpoints.
+default and requires the broker permissions and compatible downstream action endpoints. Setting
+it to false pauses new reservations and fanout. Keep the Task URL and signing key configured
+during a pause so the worker can settle reservations already committed to PostgreSQL.
 
-Assignment and priority use the Task action endpoint. Comment and notification dispatch also
-requires `AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED=true` and
-`NOTIFICATION_SERVICE_URL`. Enable this on every worker replica after Task's comment and
-notification-authorization endpoints and Notification's in-app command are available with their
-issuer trust configured. These actions only enter history if their owners confirm an applied
-receipt. A suppressed in-app notification settles as a no-op.
+Assignment and priority use the Task action endpoint.
+`AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED=true` enables new comment reservations
+using only the Task transport. New notifications additionally need `NOTIFICATION_SERVICE_URL`.
+Configure each owner's endpoint and issuer trust before admitting its actions. Keep the
+Notification URL during a pause to allow settlement of reserved notifications. These actions
+only enter history after an applied receipt. A suppressed in-app notification settles as a no-op.
 
 Creating or enabling a comment or notification rule returns `503 automation.unavailable` while
 these actions are disabled. The creation endpoint always creates an enabled rule and the patch

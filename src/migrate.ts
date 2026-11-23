@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loadConfig } from '@cadenway/nest-common';
 import { provisionJobs } from '@cadenway/nest-jobs/provisioning';
+import { finishOutboxLeaseMigration } from '@cadenway/nest-messaging/outbox/schema';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import pg from 'pg';
@@ -32,7 +33,7 @@ const migrationsFolder: string = fileURLToPath(new URL('../migrations', import.m
 const enabledRulesIndex = 'automation_rules_enabled_organization_created_id_index';
 const enabledRulesDefinition = `CREATE INDEX ${enabledRulesIndex} ON public.automation_rules USING btree (organization_id, created_at, id) WHERE enabled`;
 
-async function readEnabledRulesIndex(client: pg.Client) {
+async function readEnabledRulesIndex(client: pg.PoolClient) {
   const { rows } = await client.query<{
     readonly tableExists: boolean;
     readonly indexExists: boolean;
@@ -53,7 +54,7 @@ async function readEnabledRulesIndex(client: pg.Client) {
 }
 
 /** Prepares the live index without blocking rule writes. Fresh databases use the Drizzle DDL. */
-async function prepareEnabledRulesIndex(client: pg.Client): Promise<void> {
+async function prepareEnabledRulesIndex(client: pg.PoolClient): Promise<void> {
   const index = await readEnabledRulesIndex(client);
   if (index.indexExists && index.definition !== enabledRulesDefinition) {
     throw new Error('The existing active automation rules index has an unexpected definition.');
@@ -86,20 +87,25 @@ if (!existsSync(`${migrationsFolder}/meta/_journal.json`)) {
   console.log('No migration has been generated yet: nothing to apply.');
 } else {
   const migration: Readonly<MigrationConfig> = loadConfig(migrationConfigSchema);
-  const client: pg.Client = new pg.Client({
+  const pool: pg.Pool = new pg.Pool({
     connectionString: migration.MIGRATION_DATABASE_URL,
     application_name: 'automation-service-migrator',
   });
   try {
-    await client.connect();
-    await client.query(
-      "select pg_advisory_lock(hashtextextended('automation-service:migrations', 0))",
-    );
-    await prepareEnabledRulesIndex(client);
-    await migrate(drizzle({ client }), { migrationsFolder });
-    console.log('Migrations applied.');
+    const client = await pool.connect();
+    try {
+      await client.query(
+        "select pg_advisory_lock(hashtextextended('automation-service:migrations', 0))",
+      );
+      await prepareEnabledRulesIndex(client);
+      await migrate(drizzle({ client }), { migrationsFolder });
+      await finishOutboxLeaseMigration(client);
+      console.log('Migrations applied.');
+    } finally {
+      client.release(true);
+    }
   } finally {
-    await client.end();
+    await pool.end();
   }
   await provisionJobs({
     connection: { connectionString: migration.MIGRATION_DATABASE_URL },

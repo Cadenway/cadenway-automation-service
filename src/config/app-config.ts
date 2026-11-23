@@ -38,11 +38,12 @@ import { z } from 'zod';
  *   pagination. Continuations require this key.
  *
  * `OTEL_EXPORTER_OTLP_ENDPOINT` is read by `telemetry.ts`, before the application exists.
- * `AUTOMATION_TASK_TRIGGERS_ENABLED` starts the Task subscriptions and job worker. It is off
- * until both Task and the broker permissions are available. Enabling it requires the Automation
- * signing key and `TASK_SERVICE_URL`.
- * `AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED` starts dispatching these two action
- * types once both owners are available. It requires Task triggers and `NOTIFICATION_SERVICE_URL`.
+ * `AUTOMATION_TASK_TRIGGERS_ENABLED` enables subscriptions and new action reservations. It
+ * requires the Automation signing key and `TASK_SERVICE_URL`. The worker resumes reserved
+ * actions whenever that transport is configured, including during an admission pause.
+ * `AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED` enables new comment reservations
+ * with the Task transport, and notification reservations when `NOTIFICATION_SERVICE_URL`
+ * is also configured.
  *
  * @type {BaseConfig & DatabaseConfig & MessagingConfig & InternalTokenVerifierConfig}
  */
@@ -99,23 +100,11 @@ export const appConfigSchema: z.ZodType<AppConfig> = z
       .optional(),
   })
   .superRefine((config, ctx) => {
-    if (config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED) {
-      if (!config.AUTOMATION_TASK_TRIGGERS_ENABLED) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['AUTOMATION_TASK_TRIGGERS_ENABLED'],
-          message: 'Task triggers must be enabled for comment and notification actions.',
-        });
-      }
-      if (config.NOTIFICATION_SERVICE_URL === undefined) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['NOTIFICATION_SERVICE_URL'],
-          message: 'Required for automation notification actions.',
-        });
-      }
-    }
-    if (!config.AUTOMATION_TASK_TRIGGERS_ENABLED) return;
+    if (
+      !config.AUTOMATION_TASK_TRIGGERS_ENABLED &&
+      !config.AUTOMATION_COMMENT_AND_NOTIFICATION_ACTIONS_ENABLED
+    )
+      return;
     for (const name of ['INTERNAL_TOKEN_PRIVATE_JWK', 'TASK_SERVICE_URL'] as const) {
       if (config[name] === undefined) {
         ctx.addIssue({

@@ -17,5 +17,8 @@ export interface ExecuteAutomationRuleInput {
 
   /** Trigger fields from the validated source event. */
   readonly fact: AutomationTriggerFact;
+
+  /** Whether the worker may reserve an action that has no execution identity yet. */
+  readonly allowNewReservation: boolean;
   // #endregion
 }

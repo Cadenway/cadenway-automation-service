@@ -1,5 +1,5 @@
 import { maxEnabledAutomationRules } from '../../../../../domain/policies/rules/automation-rule-capacity.policy.js';
-import { availableAutomationActionTypes } from '../../../../models/rules/automation-action-availability.model.js';
+import type { AutomationAction } from '../../../../../domain/value-objects/rules/automation-action.value-object.js';
 import type { AutomationTaskTriggerJob } from '../../../../models/runs/automation-task-trigger-job.model.js';
 import type { AutomationTriggerJobs } from '../../../../ports/outbound/jobs/runs/automation-trigger-jobs.port.js';
 import type { AutomationTriggerRulesReader } from '../../../../ports/outbound/persistence/rules/automation-trigger-rules-reader.port.js';
@@ -9,12 +9,13 @@ import type { DispatchAutomationTaskTriggerInput } from './dispatch-automation-t
 /** Dispatches a bounded fanout or one independently retryable action. */
 export class DispatchAutomationTaskTrigger {
   // #region Constructor
-  /** Binds the paginated rule reader, durable queue, single-rule command and supported actions. */
+  /** Binds the queue and action command with the admission policy for this worker. */
   public constructor(
     private readonly rules: AutomationTriggerRulesReader,
     private readonly jobs: AutomationTriggerJobs,
     private readonly action: Pick<ExecuteAutomationRule, 'execute'>,
-    private readonly commentAndNotificationEnabled: boolean,
+    private readonly availableActions: readonly AutomationAction['type'][],
+    private readonly admissionEnabled: boolean,
   ) {}
   // #endregion
 
@@ -35,12 +36,14 @@ export class DispatchAutomationTaskTrigger {
           sourceEventId: source.id,
           taskKey: source.taskKey,
           fact,
+          allowNewReservation: this.admissionEnabled,
         },
         signal,
       );
       return;
     }
 
+    if (!this.admissionEnabled) return;
     if (fact.type === 'status' && fact.previousStatus === fact.status) return;
     const { after } = job;
     const page = await this.rules.listTriggerCandidates(organizationId, {
@@ -49,7 +52,7 @@ export class DispatchAutomationTaskTrigger {
       occurredAt: new Date(source.occurredAt),
       trigger:
         fact.type === 'created' ? { type: 'created' } : { type: 'status', status: fact.status },
-      availableActions: availableAutomationActionTypes(this.commentAndNotificationEnabled),
+      availableActions: this.availableActions,
     });
     const next: AutomationTaskTriggerJob[] = [];
     for (const rule of page.items) {

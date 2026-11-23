@@ -21,6 +21,7 @@ import { JobProducer } from '@cadenway/nest-jobs/runtime';
 import { Controller, Get, Injectable, Module } from '@nestjs/common';
 import type { BeforeApplicationShutdown } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -62,7 +63,7 @@ const otherOrganizationId = '01938f6e-0000-7000-8000-000000000002';
 const camilleMartinId = '01938f6e-8a42-7d5b-b2c9-5e1f3a6d9c24';
 
 /** Number of migrations applied on an empty test database. */
-const migrationCount = 5;
+const migrationCount = 6;
 
 /** The tables of the platform module, as the kit names them. */
 const platformTables = [
@@ -440,6 +441,84 @@ describe('automation-service wiring', () => {
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
     expect(journal.rows).toEqual([{ applied: migrationCount }]);
+  });
+
+  it('upgrades a legacy outbox and retries concurrent index finalization after interruption', async () => {
+    const port = hostPort('postgres', '5432');
+    const base = `postgres://automation_migrator:automation_migrator@127.0.0.1:${port}`;
+    const connectionString = `${base}/automation_lease_upgrade`;
+    const admin = new pg.Client(`postgres://postgres:postgres@127.0.0.1:${port}/automation`);
+    const owner = new pg.Client(connectionString);
+    const eventId = randomUUID();
+    await admin.connect();
+    try {
+      await admin.query('create database automation_lease_upgrade owner automation_migrator');
+      await owner.connect();
+      await owner.query('create schema drizzle');
+      await owner.query(`create table drizzle.__drizzle_migrations (
+        id serial primary key, hash text not null, created_at bigint)`);
+      const baseline = readMigrationFiles({
+        migrationsFolder: fileURLToPath(new URL('../migrations', import.meta.url)),
+      }).slice(0, migrationCount - 1);
+      await owner.query('begin');
+      for (const migration of baseline) {
+        for (const statement of migration.sql) {
+          await owner.query(statement);
+        }
+        await owner.query(
+          'insert into drizzle.__drizzle_migrations (hash, created_at) values ($1, $2)',
+          [migration.hash, migration.folderMillis],
+        );
+      }
+      await owner.query("set local app.system_access = 'on'");
+      await owner.query(
+        `insert into outbox_events (id, event_name, subject, stream, payload)
+         values ($1, 'automation.wiring-probe.v1', 'evt.automation.wiring-probe.v1', 'EVENTS', '{}')`,
+        [eventId],
+      );
+      await owner.query('commit');
+
+      vi.stubEnv('MIGRATION_DATABASE_URL', connectionString);
+      await runMigrator();
+      await owner.query('drop index concurrently public.outbox_events_lease_expiry_index');
+      await runMigrator();
+
+      const finalization = await owner.query(`
+        select (
+          select count(*)::int from pg_constraint
+           where conrelid = 'public.outbox_events'::regclass and convalidated
+             and conname in ('outbox_events_status_check', 'outbox_events_lease_check')
+        ) as checks, (
+          select indisvalid and indisready from pg_index
+           where indexrelid = to_regclass('public.outbox_events_lease_expiry_index')
+        ) as usable
+      `);
+      expect(finalization.rows).toEqual([{ checks: 2, usable: true }]);
+      expect(
+        (await owner.query('select count(*)::int as applied from drizzle.__drizzle_migrations'))
+          .rows,
+      ).toEqual([{ applied: migrationCount }]);
+      await owner.query("set app.system_access = 'on'");
+      const oldRow = await owner.query(
+        'select status, lease_token, lease_expires_at from outbox_events where id = $1',
+        [eventId],
+      );
+      expect(oldRow.rows).toEqual([
+        { status: 'pending', lease_token: null, lease_expires_at: null },
+      ]);
+      await expect(
+        owner.query("update outbox_events set status = 'leased' where id = $1", [eventId]),
+      ).rejects.toMatchObject({ code: '23514', constraint: 'outbox_events_lease_check' });
+      const legacyUpdate = await owner.query(
+        "update outbox_events set status = 'sent' where id = $1 returning status",
+        [eventId],
+      );
+      expect(legacyUpdate.rows).toEqual([{ status: 'sent' }]);
+    } finally {
+      vi.stubEnv('MIGRATION_DATABASE_URL', `${base}/automation`);
+      await owner.end();
+      await admin.end();
+    }
   });
 
   it('recreates the active-rule lookup index when upgrading an existing table', async () => {

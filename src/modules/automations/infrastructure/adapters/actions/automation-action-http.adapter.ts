@@ -87,7 +87,7 @@ export class AutomationActionHttpAdapter implements AutomationActionExecutor {
   /** The generated Task operation using the shared internal HTTP transport. */
   private readonly taskRoutes: ReturnType<typeof getTaskServiceInternalRoutes>;
 
-  /** The generated Notification operation, available when the additional actions are enabled. */
+  /** The generated Notification operation, retained for recovery whenever configured. */
   private readonly notificationRoutes:
     ReturnType<typeof getNotificationServiceInternalRoutes> | undefined;
   // #endregion
@@ -134,10 +134,6 @@ export class AutomationActionHttpAdapter implements AutomationActionExecutor {
       );
       return readReceipt(response, actionReceipt);
     }
-    const notificationRoutes = this.notificationRoutes;
-    if (notificationRoutes === undefined) {
-      throw new Error('Comment and notification actions are disabled.');
-    }
     try {
       if (action.type === 'comment') {
         const { taskKey } = ApplyAutomationTaskCommentInternalParams.parse({
@@ -153,6 +149,10 @@ export class AutomationActionHttpAdapter implements AutomationActionExecutor {
           options,
         );
         return readReceipt(response, commentReceipt);
+      }
+      const notificationRoutes = this.notificationRoutes;
+      if (notificationRoutes === undefined) {
+        throw new Error('The Notification action transport is not configured.');
       }
       const command = CreateAutomationNotificationInternalBody.parse({
         taskKey: run.taskKey,

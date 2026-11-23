@@ -2,19 +2,14 @@ import type { AutomationAction } from '../../../domain/value-objects/rules/autom
 
 type ActionType = AutomationAction['type'];
 const alwaysAvailable: readonly ActionType[] = ['assign', 'priority'];
-const withCommentAndNotification: readonly ActionType[] = [...alwaysAvailable, 'comment', 'notify'];
+const withComments: readonly ActionType[] = [...alwaysAvailable, 'comment'];
+const withCommentAndNotification: readonly ActionType[] = [...withComments, 'notify'];
 
 /** Lists the actions eligible for new decisions in the configured rollout. */
 export function availableAutomationActionTypes(
-  commentAndNotificationEnabled: boolean,
+  commentsEnabled: boolean,
+  notificationConfigured: boolean,
 ): readonly ActionType[] {
-  return commentAndNotificationEnabled ? withCommentAndNotification : alwaysAvailable;
-}
-
-/** Checks whether the configured rollout can admit a new decision for this action. */
-export function isAutomationActionAvailable(
-  type: ActionType,
-  commentAndNotificationEnabled: boolean,
-): boolean {
-  return availableAutomationActionTypes(commentAndNotificationEnabled).includes(type);
+  if (!commentsEnabled) return alwaysAvailable;
+  return notificationConfigured ? withCommentAndNotification : withComments;
 }
