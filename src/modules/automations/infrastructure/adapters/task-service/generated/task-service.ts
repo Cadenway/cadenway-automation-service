@@ -305,9 +305,11 @@ export const getTaskServiceInternalRoutes = (fetchFn: typeof globalThis.fetch = 
    * recorded at rule creation. It ignores `task.status-changed.v1` events from `automation`
    * actors.
    *
-   * In the tenant transaction, Task locks the target, verifies that the task and its parents
-   * are active, and rechecks the rule author's current membership and effective edit permission
-   * on the task. The rule ID remains the actor for all activity and events. Assignment also
+   * Before applying or replaying an action, Task reads the current membership of its rule
+   * author and any assignee from Organization. In the tenant transaction, Task locks the target,
+   * verifies that the task and its parents are active, and checks that the matching local
+   * membership still gives the author effective edit permission on the task. The rule ID remains
+   * the actor for all activity and events. Assignment also
    * applies Task's current recipient eligibility and assignee limit. An unchanged priority or
    * an existing eligible assignee yields `no_op`. A change commits the command receipt, write,
    * activity and usual task outbox entries together.
@@ -345,14 +347,16 @@ export const getTaskServiceInternalRoutes = (fetchFn: typeof globalThis.fetch = 
 
   /**
    * Requires signed issuer `automation-service`, audience `task-service`, an organization
-   * and an `automation` actor whose ID is the rule UUIDv7. Automation binds the command to
-   * the task key and organization of a validated `task.created.v1` or `task.status-changed.v1`
-   * event, ignores automation-authored status events, and selects the action and recorded
-   * author of its current enabled rule in that organization.
+   * and an `automation` actor whose ID is the rule UUIDv7 in canonical lowercase form.
+   * Automation signs that form so every retry uses the same actor-scoped receipt. It binds
+   * the command to the task key and organization of a validated `task.created.v1` or
+   * `task.status-changed.v1` event, ignores automation-authored status events, and selects
+   * the action and recorded author of its current enabled rule in that organization.
    *
-   * Task uses the signed organization only. It checks current rule-author membership and
-   * effective `edit` access on the active task and its active parent scope before any
-   * receipt lookup or replay. The write transaction locks and rechecks those conditions.
+   * Task uses the signed organization only. It reads the rule author's current membership
+   * from Organization and checks the matching local membership and effective `edit` access
+   * on the active task and its active parent scope before receipt lookup or replay. The
+   * write transaction locks and rechecks those local conditions.
    * The signed rule is the author of the comment, its activity and its event. On ordinary
    * comment reads, it has `actor.type: automation`, `mentions: []` and
    * `replyToCommentId: null`. The rule author's account ID serves only as authorization
